@@ -1,12 +1,32 @@
 [server]
-bind = "127.0.0.1:3000"
+bind = "0.0.0.0:3000"
+public_url = "http://localhost:3000"
+web_url = "http://localhost:5173"
+cookie_secure = false
 
 [database]
 url = "postgres://postgres:postgres@localhost/crabouncer"
+max_connections = 10
 
 [bootstrap]
-password = "123456"
+organization = "system"
+email = "admin@example.com"
+display_name = "System Administrator"
+# Set with CRABOUNCER_BOOTSTRAP_PASSWORD instead of committing a secret.
+password = ""
 
-[session]
-cookie_secure = false
-ttl_seconds = 28800
+[tokens]
+issuer = "http://localhost:3000"
+key_id = "development-key"
+private_key_path = "config/private.pem"
+public_key_path = "config/public.pem"
+access_ttl_seconds = 900
+service_ttl_seconds = 300
+refresh_ttl_seconds = 2592000
+authorization_code_ttl_seconds = 300
+activation_ttl_seconds = 86400
+session_ttl_seconds = 28800
+
+[audit]
+decision_retention_days = 90
+redacted_fields = ["password", "token", "secret", "authorization"]

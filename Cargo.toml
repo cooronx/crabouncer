@@ -1,3 +1,15 @@
 [workspace]
-members = ["core"]
+members = ["core", "protocol"]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["serde"] }
+uuid = { version = "1", features = ["serde", "v7"] }
