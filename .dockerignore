@@ -1,0 +1,7 @@
+.git
+target
+web/node_modules
+web/dist
+config/app.toml
+config/*.pem
+*.log

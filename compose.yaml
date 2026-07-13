@@ -1,0 +1,48 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: crabouncer
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d crabouncer"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  keygen:
+    image: alpine/openssl:3.5.4
+    volumes:
+      - signing-keys:/keys
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        test -s /keys/private.pem && test -s /keys/public.pem ||
+        (openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /keys/private.pem &&
+        openssl pkey -in /keys/private.pem -pubout -out /keys/public.pem)
+
+  core:
+    build: .
+    environment:
+      CRABOUNCER_BOOTSTRAP_PASSWORD: ${CRABOUNCER_BOOTSTRAP_PASSWORD:-development-only-password}
+      RUST_LOG: ${RUST_LOG:-info,tower_http=info}
+    volumes:
+      - signing-keys:/keys:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keygen:
+        condition: service_completed_successfully
+
+  web:
+    build: ./web
+    ports:
+      - "8080:80"
+    depends_on:
+      - core
+
+volumes:
+  postgres-data:
+  signing-keys:

@@ -1,0 +1,31 @@
+[server]
+bind = "0.0.0.0:3000"
+public_url = "http://localhost:8080"
+web_url = "http://localhost:8080"
+cookie_secure = false
+
+[database]
+url = "postgres://postgres:postgres@postgres/crabouncer"
+max_connections = 10
+
+[bootstrap]
+organization = "system"
+email = "admin@example.com"
+display_name = "System Administrator"
+password = ""
+
+[tokens]
+issuer = "http://localhost:8080"
+key_id = "development-key"
+private_key_path = "/keys/private.pem"
+public_key_path = "/keys/public.pem"
+access_ttl_seconds = 900
+service_ttl_seconds = 300
+refresh_ttl_seconds = 2592000
+authorization_code_ttl_seconds = 300
+activation_ttl_seconds = 86400
+session_ttl_seconds = 28800
+
+[audit]
+decision_retention_days = 90
+redacted_fields = ["password", "token", "secret", "authorization"]
