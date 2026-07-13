@@ -1,0 +1,22 @@
+# Rust build output
+/target/
+
+# Local application configuration
+/config/app.toml
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Logs and local runtime files
+*.log
+*.pid
+
+# Editor and operating system files
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db

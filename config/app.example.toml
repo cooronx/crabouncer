@@ -1,0 +1,12 @@
+[server]
+bind = "127.0.0.1:3000"
+
+[database]
+url = "postgres://postgres:postgres@localhost/crabouncer"
+
+[bootstrap]
+password = "123456"
+
+[session]
+cookie_secure = false
+ttl_seconds = 28800
