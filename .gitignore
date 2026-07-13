@@ -1,8 +1,14 @@
 # Rust build output
 /target/
+/web/node_modules/
+/web/dist/
+*.tsbuildinfo
+/web/vite.config.js
+/web/vite.config.d.ts
 
 # Local application configuration
 /config/app.toml
+/config/*.pem
 
 # Environment files
 .env
