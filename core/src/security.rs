@@ -9,12 +9,12 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, deco
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::{
     config::{Config, Tokens, read},
+    db::{BootstrapAdmin, Database},
     error::{ApiError, Result},
 };
 
@@ -125,14 +125,10 @@ pub(crate) fn now() -> i64 {
 }
 
 pub(crate) async fn bootstrap(
-    pool: &PgPool,
+    database: &Database,
     config: &Config,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-    let exists: bool =
-        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE is_system_admin)")
-            .fetch_one(pool)
-            .await?;
-    if exists {
+    if database.has_system_admin().await? {
         return Ok(());
     }
     if config.bootstrap.password.is_empty() {
@@ -142,23 +138,18 @@ pub(crate) async fn bootstrap(
         );
     }
     let hash = password_hash(&config.bootstrap.password)?;
-    let mut tx = pool.begin().await?;
     let organization_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO organizations (id, name, display_name) VALUES ($1, $2, $3)")
-        .bind(organization_id)
-        .bind(&config.bootstrap.organization)
-        .bind(&config.bootstrap.organization)
-        .execute(&mut *tx)
-        .await?;
     let user_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO users (id, organization_id, email, display_name, role, status, is_system_admin) VALUES ($1, $2, $3, $4, 'owner', 'active', true)")
-        .bind(user_id).bind(organization_id).bind(config.bootstrap.email.to_lowercase()).bind(&config.bootstrap.display_name).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO password_credentials (user_id, password_hash) VALUES ($1, $2)")
-        .bind(user_id)
-        .bind(hash)
-        .execute(&mut *tx)
+    database
+        .create_bootstrap_admin(BootstrapAdmin {
+            organization_id,
+            organization_name: config.bootstrap.organization.clone(),
+            user_id,
+            email: config.bootstrap.email.to_lowercase(),
+            display_name: config.bootstrap.display_name.clone(),
+            password_hash: hash,
+        })
         .await?;
-    tx.commit().await?;
     tracing::info!(email = %config.bootstrap.email, "created bootstrap administrator");
     Ok(())
 }

@@ -11,7 +11,6 @@ use std::sync::Arc;
 
 use axum::{Router, routing::get};
 use config::Config;
-use sqlx::postgres::PgPoolOptions;
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     trace::TraceLayer,
@@ -39,15 +38,11 @@ async fn main() {
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load()?;
-    let pool = PgPoolOptions::new()
-        .max_connections(config.database.max_connections)
-        .connect(&config.database.url)
-        .await?;
-    sqlx::migrate!().run(&pool).await?;
+    let db = db::Database::connect(&config.database.url, config.database.max_connections).await?;
+    db.migrate().await?;
     let keys = security::SigningKeys::load(&config.tokens)?;
-    security::bootstrap(&pool, &config).await?;
+    security::bootstrap(&db, &config).await?;
     let bind = config.server.bind;
-    let db = db::Database::new(pool);
     let state = Arc::new(AppState { db, config, keys });
     let request_id = axum::http::HeaderName::from_static("x-request-id");
     let app = Router::new()

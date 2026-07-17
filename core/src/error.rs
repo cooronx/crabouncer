@@ -90,25 +90,14 @@ impl From<db::Error> for ApiError {
                     "An internal error occurred",
                 )
             }
+            db::Error::Migration(error) => {
+                tracing::error!(%error, "database migration error");
+                Self::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "An internal error occurred",
+                )
+            }
         }
-    }
-}
-
-impl From<sqlx::Error> for ApiError {
-    fn from(error: sqlx::Error) -> Self {
-        tracing::error!(%error, "database error");
-        if let Some(database) = error.as_database_error()
-            && database.is_unique_violation()
-        {
-            return Self::conflict(
-                "already_exists",
-                "A resource with the same unique value already exists",
-            );
-        }
-        Self::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "An internal error occurred",
-        )
     }
 }
