@@ -1,16 +1,23 @@
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Instant,
+};
 
+use async_trait::async_trait;
+use authzen_rs::{
+    Decision, EvaluationRequest, EvaluationsRequest, EvaluationsResponse,
+    server::PolicyDecisionPoint,
+};
 use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, header},
     routing::{get, post},
 };
-use protocol::{
-    Decision, DecisionContext, EvaluationDefaults, EvaluationRequest, EvaluationSemantic,
-    EvaluationsResponse, PartialEvaluation,
-};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
 use crate::{
@@ -33,11 +40,64 @@ async fn metadata(State(state): State<Arc<AppState>>) -> Json<Value> {
     )
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 struct Caller {
     service_account_id: Uuid,
     application_id: Uuid,
     organization_id: Uuid,
+}
+
+#[derive(Clone)]
+struct CrabouncerPdp {
+    state: Arc<AppState>,
+    caller: Caller,
+    base_request_id: String,
+    next_index: Option<Arc<AtomicUsize>>,
+}
+
+impl CrabouncerPdp {
+    fn single(state: Arc<AppState>, caller: Caller, request_id: String) -> Self {
+        Self {
+            state,
+            caller,
+            base_request_id: request_id,
+            next_index: None,
+        }
+    }
+
+    fn batch(state: Arc<AppState>, caller: Caller, request_id: String) -> Self {
+        Self {
+            state,
+            caller,
+            base_request_id: request_id,
+            next_index: Some(Arc::new(AtomicUsize::new(0))),
+        }
+    }
+
+    fn request_id(&self) -> String {
+        match &self.next_index {
+            Some(index) => format!(
+                "{}:{}",
+                self.base_request_id,
+                index.fetch_add(1, Ordering::Relaxed)
+            ),
+            None => self.base_request_id.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl PolicyDecisionPoint for CrabouncerPdp {
+    type Error = ApiError;
+
+    async fn evaluate(&self, request: EvaluationRequest) -> Result<Decision> {
+        let request_id = self.request_id();
+        run_evaluation(&self.state, &self.caller, &request_id, request)
+            .await
+            .inspect_err(|error| {
+                tracing::error!(%error, %request_id, "AuthZEN evaluation failed");
+            })
+    }
 }
 
 async fn caller(state: &AppState, headers: &HeaderMap) -> Result<Caller> {
@@ -81,102 +141,30 @@ async fn evaluate_one(
     headers: HeaderMap,
     Json(request): Json<EvaluationRequest>,
 ) -> Result<Json<Decision>> {
+    request
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let caller = caller(&state, &headers).await?;
     let request_id = request_id(&headers);
-    Ok(Json(
-        run_evaluation(&state, &caller, &request_id, request).await?,
-    ))
+    let pdp = CrabouncerPdp::single(state, caller, request_id);
+    Ok(Json(pdp.evaluate(request).await?))
 }
 
 async fn evaluate_many(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(batch): Json<EvaluationDefaults>,
+    Json(batch): Json<EvaluationsRequest>,
 ) -> Result<Json<EvaluationsResponse>> {
+    batch
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let caller = caller(&state, &headers).await?;
     let base_request_id = request_id(&headers);
-    let inputs = expand(batch)?;
-    if inputs.0.len() > 100 {
+    if batch.evaluations().len() > 100 {
         return Err(ApiError::bad_request("at most 100 evaluations are allowed"));
     }
-    let semantic = inputs.1;
-    let mut decisions = Vec::with_capacity(inputs.0.len());
-    for (index, request) in inputs.0.into_iter().enumerate() {
-        let decision = run_evaluation(
-            &state,
-            &caller,
-            &format!("{base_request_id}:{index}"),
-            request,
-        )
-        .await?;
-        let stop = matches!(semantic, EvaluationSemantic::DenyOnFirstDeny) && !decision.decision
-            || matches!(semantic, EvaluationSemantic::PermitOnFirstPermit) && decision.decision;
-        decisions.push(decision);
-        if stop {
-            break;
-        }
-    }
-    Ok(Json(EvaluationsResponse {
-        evaluations: decisions,
-    }))
-}
-
-fn expand(batch: EvaluationDefaults) -> Result<(Vec<EvaluationRequest>, EvaluationSemantic)> {
-    let semantic = batch.options.evaluations_semantic;
-    if batch.evaluations.is_empty() {
-        return Ok((
-            vec![complete(
-                PartialEvaluation {
-                    subject: batch.subject,
-                    action: batch.action,
-                    resource: batch.resource,
-                    context: batch.context,
-                },
-                None,
-            )?],
-            semantic,
-        ));
-    }
-    let defaults = PartialEvaluation {
-        subject: batch.subject,
-        action: batch.action,
-        resource: batch.resource,
-        context: batch.context,
-    };
-    let requests = batch
-        .evaluations
-        .into_iter()
-        .map(|item| complete(item, Some(&defaults)))
-        .collect::<Result<Vec<_>>>()?;
-    Ok((requests, semantic))
-}
-
-fn complete(
-    item: PartialEvaluation,
-    defaults: Option<&PartialEvaluation>,
-) -> Result<EvaluationRequest> {
-    let subject = item
-        .subject
-        .or_else(|| defaults.and_then(|v| v.subject.clone()))
-        .ok_or_else(|| ApiError::bad_request("subject is required for every evaluation"))?;
-    let action = item
-        .action
-        .or_else(|| defaults.and_then(|v| v.action.clone()))
-        .ok_or_else(|| ApiError::bad_request("action is required for every evaluation"))?;
-    let resource = item
-        .resource
-        .or_else(|| defaults.and_then(|v| v.resource.clone()))
-        .ok_or_else(|| ApiError::bad_request("resource is required for every evaluation"))?;
-    let mut context = defaults.and_then(|v| v.context.clone()).unwrap_or_default();
-    if let Some(specific) = item.context {
-        context.extend(specific);
-    }
-    Ok(EvaluationRequest {
-        subject,
-        action,
-        resource,
-        context,
-    })
+    let pdp = CrabouncerPdp::batch(state, caller, base_request_id);
+    Ok(Json(pdp.evaluations(batch).await?))
 }
 
 async fn run_evaluation(
@@ -186,8 +174,11 @@ async fn run_evaluation(
     request: EvaluationRequest,
 ) -> Result<Decision> {
     let started = Instant::now();
-    let subject = if request.subject.kind == "User" {
-        Uuid::parse_str(&request.subject.id).ok()
+    let request_subject = request
+        .subject()
+        .ok_or_else(|| ApiError::bad_request("subject is required"))?;
+    let subject = if request_subject.subject_type() == Some("User") {
+        request_subject.id().and_then(|id| Uuid::parse_str(id).ok())
     } else {
         None
     };
@@ -229,13 +220,10 @@ async fn run_evaluation(
     .bind(state.config.audit.decision_retention_days as i32)
     .execute(&state.pool)
     .await;
-    Ok(Decision {
-        decision: allowed,
-        context: Some(DecisionContext {
-            request_id: request_id.into(),
-            reason,
-        }),
-    })
+    let mut context = Map::new();
+    context.insert("request_id".into(), Value::String(request_id.into()));
+    context.insert("reason".into(), Value::String(reason));
+    Ok(Decision::new(allowed).with_context(context))
 }
 
 fn request_id(headers: &HeaderMap) -> String {
@@ -265,36 +253,5 @@ fn redact(value: &mut Value, fields: &[String]) {
             }
         }
         _ => {}
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn batch_specific_context_overrides_defaults() {
-        let defaults = PartialEvaluation {
-            subject: Some(protocol::Subject::user("u")),
-            action: Some(protocol::Action::new("read")),
-            resource: None,
-            context: Some(serde_json::Map::from_iter([(
-                "network".into(),
-                json!("trusted"),
-            )])),
-        };
-        let request = complete(
-            PartialEvaluation {
-                resource: Some(protocol::Resource::new("Doc", "1")),
-                context: Some(serde_json::Map::from_iter([(
-                    "network".into(),
-                    json!("public"),
-                )])),
-                ..Default::default()
-            },
-            Some(&defaults),
-        )
-        .unwrap();
-        assert_eq!(request.context["network"], "public");
     }
 }

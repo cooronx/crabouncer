@@ -2,7 +2,7 @@
 
 Crabouncer is a multi-tenant Rust IAM that connects OIDC identity, the OpenID
 AuthZEN Authorization API 1.0, and Cedar policy evaluation. It includes an
-administration web app and an async Rust SDK.
+administration web app and interoperates with the `authzen-rs` async Rust SDK.
 
 ## What is included
 
@@ -18,7 +18,7 @@ administration web app and an async Rust SDK.
   exactly one organization; system administrators can manage every tenant.
 - Decision logs with configurable field redaction and retention, plus
   management audit logs.
-- React management UI and `crabouncer-sdk` for Rust PEP integrations.
+- React management UI and `authzen-rs` support for Rust PEP integrations.
 
 ## Run with Docker Compose
 
@@ -85,28 +85,41 @@ metadata is published at `/.well-known/openid-configuration`.
 
 ## Rust SDK
 
-```rust
-use crabouncer_sdk::{Action, AuthzenClient, Resource, Subject};
+Crabouncer uses the published [`authzen-rs`](https://crates.io/crates/authzen-rs)
+crate instead of maintaining a project-specific AuthZEN protocol or SDK:
 
-let authzen = AuthzenClient::new(
-    "https://iam.example.com",
-    service_client_id,
-    service_client_secret,
-);
-
-authzen
-    .require_allowed(
-        Subject::user(user_id),
-        Action::new("factor.delete"),
-        Resource::new("Factor", factor_id)
-            .property("organization_id", organization_id.to_string())
-            .property("owner_id", user_id.to_string()),
-    )
-    .await?;
+```toml
+[dependencies]
+authzen-rs = "0.2.1"
 ```
 
-The SDK caches and refreshes service tokens, retries once after an unauthorized
-response, propagates a request ID, and maps a false decision to `Error::Denied`.
+```rust
+use authzen_rs::{Action, AuthZenClient, EvaluationRequest, Resource, Subject};
+
+let authzen = AuthZenClient::builder("https://iam.example.com")
+    .bearer_token(service_access_token)
+    .discover()
+    .build()
+    .await?;
+
+let decision = authzen
+    .evaluate(EvaluationRequest::new(
+        Subject::new("User", user_id),
+        Action::new("factor.delete"),
+        Resource::new("Factor", factor_id)
+            .with_property("organization_id", organization_id.to_string())
+            .with_property("owner_id", user_id.to_string()),
+    ))
+    .await?;
+
+if !decision.allowed() {
+    // Reject the protected operation.
+}
+```
+
+Obtain `service_access_token` from `/oauth2/token` with the Client Credentials
+grant and the `authzen:evaluate` scope. `authzen-rs` accepts the resulting
+Bearer Token; the calling service is responsible for token caching and refresh.
 
 ## Checks
 

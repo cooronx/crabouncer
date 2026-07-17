@@ -1,3 +1,5 @@
+use std::fmt;
+
 use axum::{
     Json,
     http::StatusCode,
@@ -14,6 +16,14 @@ pub(crate) struct ApiError {
     message: String,
     details: Value,
 }
+
+impl fmt::Display for ApiError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for ApiError {}
 
 impl ApiError {
     pub(crate) fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {

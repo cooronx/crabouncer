@@ -1,10 +1,10 @@
 use std::str::FromStr;
 
+use authzen_rs::EvaluationRequest;
 use cedar_policy::{
     Authorizer, Context, Decision as CedarDecision, Entities, EntityUid, PolicySet, Request,
     Schema, ValidationMode, Validator,
 };
-use protocol::EvaluationRequest;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use uuid::Uuid;
@@ -58,10 +58,36 @@ pub(crate) fn evaluate(
     organization_id: Uuid,
     authoritative_subject: Option<Value>,
 ) -> Result<Value> {
+    input
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let subject = input
+        .subject()
+        .ok_or_else(|| ApiError::bad_request("subject is required"))?;
+    let subject_type = subject
+        .subject_type()
+        .ok_or_else(|| ApiError::bad_request("subject.type is required"))?;
+    let subject_id = subject
+        .id()
+        .ok_or_else(|| ApiError::bad_request("subject.id is required"))?;
+    let action = input
+        .action()
+        .ok_or_else(|| ApiError::bad_request("action is required"))?;
+    let action_name = action
+        .name()
+        .ok_or_else(|| ApiError::bad_request("action.name is required"))?;
+    let resource = input
+        .resource()
+        .ok_or_else(|| ApiError::bad_request("resource is required"))?;
+    let resource_type = resource
+        .resource_type()
+        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
+    let resource_id = resource
+        .id()
+        .ok_or_else(|| ApiError::bad_request("resource.id is required"))?;
     let expected_org = organization_id.to_string();
-    if input
-        .resource
-        .properties
+    if resource
+        .properties()
         .get("organization_id")
         .and_then(Value::as_str)
         != Some(expected_org.as_str())
@@ -72,14 +98,14 @@ pub(crate) fn evaluate(
     }
     let schema = parse_schema(schema_source)?;
     let policies = parse_policies(policies)?;
-    let principal = uid(&input.subject.kind, &input.subject.id)?;
-    let action = uid("Action", &input.action.name)?;
-    let resource = uid(&input.resource.kind, &input.resource.id)?;
+    let principal = uid(subject_type, subject_id)?;
+    let action = uid("Action", action_name)?;
+    let resource_uid = uid(resource_type, resource_id)?;
     let mut all_entities = persistent_entities
         .as_array()
         .cloned()
         .ok_or_else(|| ApiError::validation("entities must be an array", Value::Null))?;
-    let mut subject_attrs = input.subject.properties.clone();
+    let mut subject_attrs = subject.properties().clone();
     subject_attrs.insert(
         "organization_id".into(),
         Value::String(expected_org.clone()),
@@ -91,16 +117,16 @@ pub(crate) fn evaluate(
     }
     replace_entity(
         &mut all_entities,
-        &input.subject.kind,
-        &input.subject.id,
+        subject_type,
+        subject_id,
         Value::Object(subject_attrs),
     );
-    let mut resource_attrs = input.resource.properties.clone();
+    let mut resource_attrs = resource.properties().clone();
     resource_attrs.insert("organization_id".into(), Value::String(expected_org));
     replace_entity(
         &mut all_entities,
-        &input.resource.kind,
-        &input.resource.id,
+        resource_type,
+        resource_id,
         Value::Object(resource_attrs),
     );
     let entities =
@@ -111,7 +137,7 @@ pub(crate) fn evaluate(
             )
         })?;
     let context = Context::from_json_value(
-        Value::Object(input.context.clone()),
+        Value::Object(input.context().cloned().unwrap_or_default()),
         Some((&schema, &action)),
     )
     .map_err(|e| {
@@ -121,7 +147,7 @@ pub(crate) fn evaluate(
         )
     })?;
     let request =
-        Request::new(principal, action, resource, context, Some(&schema)).map_err(|e| {
+        Request::new(principal, action, resource_uid, context, Some(&schema)).map_err(|e| {
             ApiError::validation(
                 "request does not conform to the active schema",
                 json!([e.to_string()]),
@@ -208,13 +234,11 @@ mod tests {
 
     #[test]
     fn rejects_cross_tenant_resource_before_cedar() {
-        let request = EvaluationRequest {
-            subject: protocol::Subject::user("alice"),
-            action: protocol::Action::new("read"),
-            resource: protocol::Resource::new("Document", "one")
-                .property("organization_id", "other"),
-            context: Default::default(),
-        };
+        let request = EvaluationRequest::new(
+            authzen_rs::Subject::new("User", "alice"),
+            authzen_rs::Action::new("read"),
+            authzen_rs::Resource::new("Document", "one").with_property("organization_id", "other"),
+        );
         let result = evaluate("{}", &json!([]), &json!([]), &request, Uuid::nil(), None).unwrap();
         assert_eq!(result["reason"], "tenant_mismatch");
     }
@@ -234,13 +258,12 @@ mod tests {
             }
         }).to_string();
         let policies = json!([{ "name": "same tenant", "enabled": true, "source": "permit (principal, action == Action::\"read\", resource) when { principal.organization_id == resource.organization_id };" }]);
-        let request = EvaluationRequest {
-            subject: protocol::Subject::user(Uuid::now_v7().to_string()),
-            action: protocol::Action::new("read"),
-            resource: protocol::Resource::new("Document", "one")
-                .property("organization_id", organization_id.to_string()),
-            context: Default::default(),
-        };
+        let request = EvaluationRequest::new(
+            authzen_rs::Subject::new("User", Uuid::now_v7().to_string()),
+            authzen_rs::Action::new("read"),
+            authzen_rs::Resource::new("Document", "one")
+                .with_property("organization_id", organization_id.to_string()),
+        );
         let result = evaluate(
             &schema,
             &policies,

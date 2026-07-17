@@ -769,7 +769,7 @@ async fn simulate_workspace(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Json(request): Json<protocol::EvaluationRequest>,
+    Json(request): Json<authzen_rs::EvaluationRequest>,
 ) -> Result<Json<Value>> {
     let (_, app) = authorize_app(&state, &headers, id, false).await?;
     let row: (String, Value, Value) = sqlx::query_as(
