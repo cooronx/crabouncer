@@ -15,7 +15,11 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    db::{Actor, LoginUser, NewSession},
+    db::{
+        ActivationToken, Actor, AuditEvent, LoginUser, NewOrganization, NewSession, NewUser,
+        Organization, UpdateOrganization as DatabaseUpdateOrganization,
+        UpdateUser as DatabaseUpdateUser, User, UserAccess,
+    },
     error::{ApiError, Result},
     policy, security,
 };
@@ -232,25 +236,15 @@ async fn activate(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize, FromRow)]
-struct OrganizationView {
-    id: Uuid,
-    name: String,
-    display_name: String,
-    status: String,
-    created_at: OffsetDateTime,
-    updated_at: OffsetDateTime,
-}
 async fn list_organizations(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<Vec<OrganizationView>>> {
+) -> Result<Json<Vec<Organization>>> {
     let current = actor(&state, &headers, false).await?;
-    let rows = if current.is_system_admin {
-        sqlx::query_as("SELECT id, name, display_name, status::text AS status, created_at, updated_at FROM organizations ORDER BY created_at").fetch_all(&state.pool).await?
-    } else {
-        sqlx::query_as("SELECT id, name, display_name, status::text AS status, created_at, updated_at FROM organizations WHERE id = $1").bind(current.organization_id).fetch_all(&state.pool).await?
-    };
+    let rows = state
+        .db
+        .organizations_for(current.organization_id, current.is_system_admin)
+        .await?;
     Ok(Json(rows))
 }
 #[derive(Deserialize)]
@@ -275,26 +269,30 @@ async fn create_organization(
     let org_id = Uuid::now_v7();
     let user_id = Uuid::now_v7();
     let token = security::random_token();
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("INSERT INTO organizations (id, name, display_name) VALUES ($1, $2, $3)")
-        .bind(org_id)
-        .bind(body.name.trim())
-        .bind(body.display_name.trim())
-        .execute(&mut *tx)
+    state
+        .db
+        .create_organization(NewOrganization {
+            id: org_id,
+            name: body.name.trim().into(),
+            display_name: body.display_name.trim().into(),
+            owner_id: user_id,
+            owner_email: body.owner_email.trim().to_lowercase(),
+            owner_display_name: body.owner_display_name.trim().into(),
+            activation: ActivationToken {
+                hash: security::token_hash(&token),
+                expires_at: OffsetDateTime::now_utc()
+                    + Duration::seconds(state.config.tokens.activation_ttl_seconds),
+            },
+            audit: AuditEvent {
+                organization_id: Some(org_id),
+                actor_user_id: current.id,
+                action: "organization.create".into(),
+                target_type: "organization".into(),
+                target_id: Some(org_id.to_string()),
+                details: json!({}),
+            },
+        })
         .await?;
-    sqlx::query("INSERT INTO users (id, organization_id, email, display_name, role) VALUES ($1, $2, $3, $4, 'owner')").bind(user_id).bind(org_id).bind(body.owner_email.trim().to_lowercase()).bind(body.owner_display_name.trim()).execute(&mut *tx).await?;
-    insert_activation(&mut tx, &state, user_id, &token).await?;
-    audit(
-        &mut tx,
-        &current,
-        Some(org_id),
-        "organization.create",
-        "organization",
-        Some(org_id.to_string()),
-        json!({}),
-    )
-    .await?;
-    tx.commit().await?;
     Ok((
         StatusCode::CREATED,
         Json(
@@ -306,9 +304,15 @@ async fn get_organization(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<OrganizationView>> {
+) -> Result<Json<Organization>> {
     can_view(&actor(&state, &headers, false).await?, id)?;
-    Ok(Json(sqlx::query_as("SELECT id, name, display_name, status::text AS status, created_at, updated_at FROM organizations WHERE id = $1").bind(id).fetch_optional(&state.pool).await?.ok_or_else(|| ApiError::not_found("Organization"))?))
+    Ok(Json(
+        state
+            .db
+            .organization(id)
+            .await?
+            .ok_or_else(|| ApiError::not_found("Organization"))?,
+    ))
 }
 #[derive(Deserialize)]
 struct UpdateOrganization {
@@ -320,7 +324,7 @@ async fn update_organization(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateOrganization>,
-) -> Result<Json<OrganizationView>> {
+) -> Result<Json<Organization>> {
     let current = actor(&state, &headers, true).await?;
     owner_or_system(&current, id)?;
     if body
@@ -330,8 +334,14 @@ async fn update_organization(
     {
         return Err(ApiError::bad_request("status must be active or disabled"));
     }
-    sqlx::query("UPDATE organizations SET display_name = COALESCE($2, display_name), status = COALESCE($3::organization_status, status), updated_at = now() WHERE id = $1")
-        .bind(id).bind(body.display_name.as_deref().map(str::trim)).bind(body.status).execute(&state.pool).await?;
+    state
+        .db
+        .update_organization(DatabaseUpdateOrganization {
+            id,
+            display_name: body.display_name.map(|value| value.trim().into()),
+            status: body.status,
+        })
+        .await?;
     audit_event(
         &state,
         &current,
@@ -344,24 +354,13 @@ async fn update_organization(
     get_organization(State(state), headers, Path(id)).await
 }
 
-#[derive(Serialize, FromRow)]
-struct UserView {
-    id: Uuid,
-    organization_id: Uuid,
-    email: String,
-    display_name: String,
-    role: String,
-    status: String,
-    is_system_admin: bool,
-    created_at: OffsetDateTime,
-}
 async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<UserView>>> {
+) -> Result<Json<Vec<User>>> {
     can_view(&actor(&state, &headers, false).await?, id)?;
-    Ok(Json(sqlx::query_as("SELECT id, organization_id, email, display_name, role::text AS role, status::text AS status, is_system_admin, created_at FROM users WHERE organization_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.pool).await?))
+    Ok(Json(state.db.users(id).await?))
 }
 #[derive(Deserialize)]
 struct CreateUser {
@@ -384,20 +383,29 @@ async fn create_user(
     }
     let user_id = Uuid::now_v7();
     let token = security::random_token();
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("INSERT INTO users (id, organization_id, email, display_name, role) VALUES ($1, $2, $3, $4, $5::organization_role)").bind(user_id).bind(id).bind(body.email.trim().to_lowercase()).bind(body.display_name.trim()).bind(body.role).execute(&mut *tx).await?;
-    insert_activation(&mut tx, &state, user_id, &token).await?;
-    audit(
-        &mut tx,
-        &current,
-        Some(id),
-        "user.create",
-        "user",
-        Some(user_id.to_string()),
-        json!({}),
-    )
-    .await?;
-    tx.commit().await?;
+    state
+        .db
+        .create_user(NewUser {
+            id: user_id,
+            organization_id: id,
+            email: body.email.trim().to_lowercase(),
+            display_name: body.display_name.trim().into(),
+            role: body.role,
+            activation: ActivationToken {
+                hash: security::token_hash(&token),
+                expires_at: OffsetDateTime::now_utc()
+                    + Duration::seconds(state.config.tokens.activation_ttl_seconds),
+            },
+            audit: AuditEvent {
+                organization_id: Some(id),
+                actor_user_id: current.id,
+                action: "user.create".into(),
+                target_type: "user".into(),
+                target_id: Some(user_id.to_string()),
+                details: json!({}),
+            },
+        })
+        .await?;
     Ok((
         StatusCode::CREATED,
         Json(json!({ "user_id": user_id, "activation_url": activation_url(&state, &token) })),
@@ -415,21 +423,20 @@ async fn update_user(
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateUser>,
 ) -> Result<StatusCode> {
-    let (organization_id, old_role): (Uuid, String) =
-        sqlx::query_as("SELECT organization_id, role::text FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or_else(|| ApiError::not_found("User"))?;
+    let access: UserAccess = state
+        .db
+        .user_access(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("User"))?;
     let current = actor(&state, &headers, true).await?;
-    can_manage(&current, organization_id)?;
-    if old_role == "owner" {
-        owner_or_system(&current, organization_id)?;
+    can_manage(&current, access.organization_id)?;
+    if access.role == "owner" {
+        owner_or_system(&current, access.organization_id)?;
     }
     if let Some(role) = &body.role {
         validate_role(role)?;
         if role == "owner" {
-            owner_or_system(&current, organization_id)?;
+            owner_or_system(&current, access.organization_id)?;
         }
     }
     if body
@@ -439,17 +446,19 @@ async fn update_user(
     {
         return Err(ApiError::bad_request("status must be active or disabled"));
     }
-    sqlx::query("UPDATE users SET display_name = COALESCE($2, display_name), role = COALESCE($3::organization_role, role), status = COALESCE($4::user_status, status), updated_at = now() WHERE id = $1").bind(id).bind(body.display_name.as_deref().map(str::trim)).bind(body.role.as_deref()).bind(body.status.as_deref()).execute(&state.pool).await?;
-    if body.status.as_deref() == Some("disabled") {
-        sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
-    }
+    state
+        .db
+        .update_user(DatabaseUpdateUser {
+            id,
+            display_name: body.display_name.map(|value| value.trim().into()),
+            role: body.role,
+            status: body.status,
+        })
+        .await?;
     audit_event(
         &state,
         &current,
-        Some(organization_id),
+        Some(access.organization_id),
         "user.update",
         "user",
         id,
@@ -890,22 +899,6 @@ async fn list_audit_logs(
     Ok(Json(rows))
 }
 
-async fn insert_activation(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    state: &AppState,
-    user_id: Uuid,
-    token: &str,
-) -> std::result::Result<(), sqlx::Error> {
-    sqlx::query(
-        "INSERT INTO activation_tokens (token_hash, user_id, expires_at) VALUES ($1, $2, $3)",
-    )
-    .bind(security::token_hash(token))
-    .bind(user_id)
-    .bind(OffsetDateTime::now_utc() + Duration::seconds(state.config.tokens.activation_ttl_seconds))
-    .execute(&mut **tx)
-    .await?;
-    Ok(())
-}
 async fn audit(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     current: &Actor,
@@ -926,8 +919,17 @@ async fn audit_event(
     target_type: &str,
     target_id: Uuid,
 ) -> Result<()> {
-    sqlx::query("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, target_type, target_id) VALUES ($1, $2, $3, $4, $5, $6)")
-        .bind(Uuid::now_v7()).bind(organization_id).bind(current.id).bind(action).bind(target_type).bind(target_id.to_string()).execute(&state.pool).await?;
+    state
+        .db
+        .record_audit(AuditEvent {
+            organization_id,
+            actor_user_id: current.id,
+            action: action.into(),
+            target_type: target_type.into(),
+            target_id: Some(target_id.to_string()),
+            details: json!({}),
+        })
+        .await?;
     Ok(())
 }
 fn activation_url(state: &AppState, token: &str) -> String {

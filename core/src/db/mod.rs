@@ -1,17 +1,24 @@
+mod audit;
 mod authzen;
 mod oidc;
 mod sessions;
+mod tenants;
 
 use std::fmt;
 
 use sqlx::PgPool;
 
+pub(crate) use audit::AuditEvent;
 pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttributes};
 pub(crate) use oidc::{
     AuthorizationApp, AuthorizationCode, AuthorizationCodeExchange, RefreshRotation,
     ServiceCredential, UserGrant, UserProfile,
 };
 pub(crate) use sessions::{Actor, LoginUser, NewSession};
+pub(crate) use tenants::{
+    ActivationToken, NewOrganization, NewUser, Organization, UpdateOrganization, UpdateUser, User,
+    UserAccess,
+};
 
 #[derive(Clone)]
 pub(crate) struct Database {
