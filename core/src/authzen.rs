@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    db::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttributes},
     error::{ApiError, Result},
     policy,
 };
@@ -40,23 +41,16 @@ async fn metadata(State(state): State<Arc<AppState>>) -> Json<Value> {
     )
 }
 
-#[derive(Clone, sqlx::FromRow)]
-struct Caller {
-    service_account_id: Uuid,
-    application_id: Uuid,
-    organization_id: Uuid,
-}
-
 #[derive(Clone)]
 struct CrabouncerPdp {
     state: Arc<AppState>,
-    caller: Caller,
+    caller: AuthzenCaller,
     base_request_id: String,
     next_index: Option<Arc<AtomicUsize>>,
 }
 
 impl CrabouncerPdp {
-    fn single(state: Arc<AppState>, caller: Caller, request_id: String) -> Self {
+    fn single(state: Arc<AppState>, caller: AuthzenCaller, request_id: String) -> Self {
         Self {
             state,
             caller,
@@ -65,7 +59,7 @@ impl CrabouncerPdp {
         }
     }
 
-    fn batch(state: Arc<AppState>, caller: Caller, request_id: String) -> Self {
+    fn batch(state: Arc<AppState>, caller: AuthzenCaller, request_id: String) -> Self {
         Self {
             state,
             caller,
@@ -100,7 +94,7 @@ impl PolicyDecisionPoint for CrabouncerPdp {
     }
 }
 
-async fn caller(state: &AppState, headers: &HeaderMap) -> Result<Caller> {
+async fn caller(state: &AppState, headers: &HeaderMap) -> Result<AuthzenCaller> {
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
@@ -128,8 +122,11 @@ async fn caller(state: &AppState, headers: &HeaderMap) -> Result<Caller> {
         .as_deref()
         .and_then(|v| Uuid::parse_str(v).ok())
         .ok_or_else(ApiError::unauthorized)?;
-    let row = sqlx::query_as::<_, Caller>("SELECT s.id AS service_account_id, a.id AS application_id, a.organization_id FROM service_accounts s JOIN applications a ON a.id = s.application_id JOIN organizations o ON o.id = a.organization_id WHERE s.id = $1 AND a.id = $2 AND s.enabled AND a.enabled AND o.status = 'active'")
-        .bind(account_id).bind(application_id).fetch_optional(&state.pool).await?.ok_or_else(ApiError::unauthorized)?;
+    let row = state
+        .db
+        .authzen_caller(account_id, application_id)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
     if claims.organization_id != row.organization_id.to_string() {
         return Err(ApiError::unauthorized());
     }
@@ -169,7 +166,7 @@ async fn evaluate_many(
 
 async fn run_evaluation(
     state: &AppState,
-    caller: &Caller,
+    caller: &AuthzenCaller,
     request_id: &str,
     request: EvaluationRequest,
 ) -> Result<Decision> {
@@ -182,20 +179,28 @@ async fn run_evaluation(
     } else {
         None
     };
-    let authoritative = if let Some(user_id) = subject {
-        sqlx::query_as::<_, (String, String)>("SELECT email, role::text FROM users WHERE id = $1 AND organization_id = $2 AND status = 'active'").bind(user_id).bind(caller.organization_id).fetch_optional(&state.pool).await?.map(|(email, role)| json!({ "email": email, "role": role }))
+    let attributes: Option<SubjectAttributes> = if let Some(user_id) = subject {
+        state
+            .db
+            .active_subject_attributes(user_id, caller.organization_id)
+            .await?
     } else {
         None
     };
+    let authoritative =
+        attributes.map(|subject| json!({ "email": subject.email, "role": subject.role }));
     let evaluation = if authoritative.is_none() {
         json!({ "decision": false, "reason": "subject_not_found", "policies": [], "errors": [] })
     } else {
-        let release: Option<(String, Value, Value)> = sqlx::query_as("SELECT r.schema_source, r.policies, r.entities FROM active_policy_releases ar JOIN policy_releases r ON r.id = ar.release_id WHERE ar.application_id = $1").bind(caller.application_id).fetch_optional(&state.pool).await?;
+        let release: Option<PolicyRelease> = state
+            .db
+            .active_policy_release(caller.application_id)
+            .await?;
         match release {
-            Some((schema, policies, entities)) => policy::evaluate(
-                &schema,
-                &policies,
-                &entities,
+            Some(release) => policy::evaluate(
+                &release.schema_source,
+                &release.policies,
+                &release.entities,
                 &request,
                 caller.organization_id,
                 authoritative,
@@ -212,14 +217,21 @@ async fn run_evaluation(
         .to_owned();
     let mut logged = serde_json::to_value(&request).unwrap_or(Value::Null);
     redact(&mut logged, &state.config.audit.redacted_fields);
-    sqlx::query("INSERT INTO decision_logs (id, organization_id, application_id, service_account_id, request_id, request, decision, reason, diagnostics, duration_us) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)")
-        .bind(Uuid::now_v7()).bind(caller.organization_id).bind(caller.application_id).bind(caller.service_account_id).bind(request_id).bind(logged).bind(allowed).bind(&reason).bind(&evaluation).bind(started.elapsed().as_micros() as i64).execute(&state.pool).await?;
-    let _ = sqlx::query(
-        "DELETE FROM decision_logs WHERE created_at < now() - make_interval(days => $1)",
-    )
-    .bind(state.config.audit.decision_retention_days as i32)
-    .execute(&state.pool)
-    .await;
+    state
+        .db
+        .record_decision(DecisionLog {
+            organization_id: caller.organization_id,
+            application_id: caller.application_id,
+            service_account_id: caller.service_account_id,
+            request_id: request_id.into(),
+            request: logged,
+            decision: allowed,
+            reason: reason.clone(),
+            diagnostics: evaluation,
+            duration_us: started.elapsed().as_micros() as i64,
+            retention_days: state.config.audit.decision_retention_days,
+        })
+        .await?;
     let mut context = Map::new();
     context.insert("request_id".into(), Value::String(request_id.into()));
     context.insert("reason".into(), Value::String(reason));

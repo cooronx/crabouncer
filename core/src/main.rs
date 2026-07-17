@@ -1,5 +1,6 @@
 mod authzen;
 mod config;
+mod db;
 mod error;
 mod management;
 mod oidc;
@@ -19,6 +20,7 @@ use tracing_subscriber::EnvFilter;
 
 pub(crate) struct AppState {
     pool: PgPool,
+    db: db::Database,
     config: Config,
     keys: security::SigningKeys,
 }
@@ -46,7 +48,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let keys = security::SigningKeys::load(&config.tokens)?;
     security::bootstrap(&pool, &config).await?;
     let bind = config.server.bind;
-    let state = Arc::new(AppState { pool, config, keys });
+    let db = db::Database::new(pool.clone());
+    let state = Arc::new(AppState {
+        pool,
+        db,
+        config,
+        keys,
+    });
     let request_id = axum::http::HeaderName::from_static("x-request-id");
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))

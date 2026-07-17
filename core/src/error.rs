@@ -7,6 +7,8 @@ use axum::{
 };
 use serde_json::{Value, json};
 
+use crate::db;
+
 pub(crate) type Result<T> = std::result::Result<T, ApiError>;
 
 #[derive(Debug)]
@@ -70,6 +72,25 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.status, Json(json!({ "error": { "code": self.code, "message": self.message, "details": self.details } }))).into_response()
+    }
+}
+
+impl From<db::Error> for ApiError {
+    fn from(error: db::Error) -> Self {
+        match error {
+            db::Error::Conflict => Self::conflict(
+                "already_exists",
+                "A resource with the same unique value already exists",
+            ),
+            db::Error::Internal(error) => {
+                tracing::error!(%error, "database error");
+                Self::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "An internal error occurred",
+                )
+            }
+        }
     }
 }
 
