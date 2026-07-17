@@ -872,7 +872,7 @@ async fn list_decision_logs(
 ) -> Result<Json<Vec<Value>>> {
     can_view(&actor(&state, &headers, false).await?, id)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(d) FROM (SELECT id, application_id, service_account_id, request_id, request, decision, reason, diagnostics, duration_us, created_at FROM decision_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2) d").bind(id).bind(limit).fetch_all(&state.pool).await?;
+    let rows = state.db.decision_logs(id, limit).await?;
     Ok(Json(rows))
 }
 async fn list_audit_logs(
@@ -883,7 +883,7 @@ async fn list_audit_logs(
 ) -> Result<Json<Vec<Value>>> {
     can_view(&actor(&state, &headers, false).await?, id)?;
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
-    let rows: Vec<Value> = sqlx::query_scalar("SELECT to_jsonb(a) FROM (SELECT id, actor_user_id, action, target_type, target_id, details, created_at FROM audit_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2) a").bind(id).bind(limit).fetch_all(&state.pool).await?;
+    let rows = state.db.audit_logs(id, limit).await?;
     Ok(Json(rows))
 }
 

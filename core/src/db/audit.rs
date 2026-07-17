@@ -41,4 +41,24 @@ impl Database {
             .await?;
         Ok(())
     }
+
+    pub(crate) async fn decision_logs(
+        &self,
+        organization_id: Uuid,
+        limit: i64,
+    ) -> Result<Vec<Value>> {
+        Ok(sqlx::query_scalar("SELECT to_jsonb(d) FROM (SELECT id, application_id, service_account_id, request_id, request, decision, reason, diagnostics, duration_us, created_at FROM decision_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2) d")
+            .bind(organization_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?)
+    }
+
+    pub(crate) async fn audit_logs(&self, organization_id: Uuid, limit: i64) -> Result<Vec<Value>> {
+        Ok(sqlx::query_scalar("SELECT to_jsonb(a) FROM (SELECT id, actor_user_id, action, target_type, target_id, details, created_at FROM audit_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2) a")
+            .bind(organization_id)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await?)
+    }
 }
