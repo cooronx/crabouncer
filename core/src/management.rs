@@ -7,9 +7,8 @@ use axum::{
     routing::{get, post},
 };
 use cookie::{Cookie, SameSite};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::FromRow;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
@@ -17,10 +16,11 @@ use crate::{
     AppState,
     db::{
         ActivationToken, Actor, Application, AuditEvent, LoginUser, NewApplication,
-        NewOrganization, NewServiceAccount, NewServiceSecret, NewSession, NewUser, Organization,
-        ServiceAccount, UpdateApplication as DatabaseUpdateApplication,
-        UpdateOrganization as DatabaseUpdateOrganization, UpdateUser as DatabaseUpdateUser, User,
-        UserAccess,
+        NewOrganization, NewPolicyRelease, NewServiceAccount, NewServiceSecret, NewSession,
+        NewUser, Organization, PolicyReleaseResult, PolicySnapshot, Release, ServiceAccount,
+        UpdateApplication as DatabaseUpdateApplication,
+        UpdateOrganization as DatabaseUpdateOrganization, UpdateUser as DatabaseUpdateUser,
+        UpdateWorkspace as DatabaseUpdateWorkspace, User, UserAccess, Workspace,
     },
     error::{ApiError, Result},
     policy, security,
@@ -700,14 +700,6 @@ async fn revoke_service_secret(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize, FromRow)]
-struct WorkspaceView {
-    application_id: Uuid,
-    schema_source: String,
-    policies: Value,
-    entities: Value,
-    updated_at: OffsetDateTime,
-}
 async fn authorize_app(
     state: &AppState,
     headers: &HeaderMap,
@@ -727,9 +719,9 @@ async fn get_workspace(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<WorkspaceView>> {
+) -> Result<Json<Workspace>> {
     authorize_app(&state, &headers, id, false).await?;
-    Ok(Json(sqlx::query_as("SELECT application_id, schema_source, policies, entities, updated_at FROM policy_workspaces WHERE application_id = $1").bind(id).fetch_one(&state.pool).await?))
+    Ok(Json(state.db.workspace(id).await?))
 }
 #[derive(Deserialize)]
 struct WorkspaceInput {
@@ -749,7 +741,15 @@ async fn update_workspace(
             "policies and entities must be arrays",
         ));
     }
-    sqlx::query("UPDATE policy_workspaces SET schema_source = $2, policies = $3, entities = $4, updated_at = now() WHERE application_id = $1").bind(id).bind(body.schema_source).bind(body.policies).bind(body.entities).execute(&state.pool).await?;
+    state
+        .db
+        .update_workspace(DatabaseUpdateWorkspace {
+            application_id: id,
+            schema_source: body.schema_source,
+            policies: body.policies,
+            entities: body.entities,
+        })
+        .await?;
     audit_event(
         &state,
         &current,
@@ -767,13 +767,12 @@ async fn validate_workspace(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>> {
     authorize_app(&state, &headers, id, false).await?;
-    let row: (String, Value, Value) = sqlx::query_as(
-        "SELECT schema_source, policies, entities FROM policy_workspaces WHERE application_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
-    policy::validate_workspace(&row.0, &row.1, &row.2)?;
+    let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
+    policy::validate_workspace(
+        &snapshot.schema_source,
+        &snapshot.policies,
+        &snapshot.entities,
+    )?;
     Ok(Json(json!({ "valid": true })))
 }
 async fn simulate_workspace(
@@ -783,37 +782,23 @@ async fn simulate_workspace(
     Json(request): Json<authzen_rs::EvaluationRequest>,
 ) -> Result<Json<Value>> {
     let (_, app) = authorize_app(&state, &headers, id, false).await?;
-    let row: (String, Value, Value) = sqlx::query_as(
-        "SELECT schema_source, policies, entities FROM policy_workspaces WHERE application_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
+    let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
     Ok(Json(policy::evaluate(
-        &row.0,
-        &row.1,
-        &row.2,
+        &snapshot.schema_source,
+        &snapshot.policies,
+        &snapshot.entities,
         &request,
         app.organization_id,
         None,
     )?))
 }
-#[derive(Serialize, FromRow)]
-struct ReleaseView {
-    id: Uuid,
-    application_id: Uuid,
-    version: i64,
-    created_by: Uuid,
-    created_at: OffsetDateTime,
-    active: bool,
-}
 async fn list_releases(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<ReleaseView>>> {
+) -> Result<Json<Vec<Release>>> {
     authorize_app(&state, &headers, id, false).await?;
-    Ok(Json(sqlx::query_as("SELECT r.id, r.application_id, r.version, r.created_by, r.created_at, ar.release_id IS NOT NULL AS active FROM policy_releases r LEFT JOIN active_policy_releases ar ON ar.release_id = r.id WHERE r.application_id = $1 ORDER BY r.version DESC").bind(id).fetch_all(&state.pool).await?))
+    Ok(Json(state.db.releases(id).await?))
 }
 async fn publish_release(
     State(state): State<Arc<AppState>>,
@@ -821,41 +806,33 @@ async fn publish_release(
     Path(id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let (current, app) = authorize_app(&state, &headers, id, true).await?;
-    let row: (String, Value, Value) = sqlx::query_as(
-        "SELECT schema_source, policies, entities FROM policy_workspaces WHERE application_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
-    policy::validate_workspace(&row.0, &row.1, &row.2)?;
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    let version: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(max(version), 0) + 1 FROM policy_releases WHERE application_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
+    let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
+    policy::validate_workspace(
+        &snapshot.schema_source,
+        &snapshot.policies,
+        &snapshot.entities,
+    )?;
     let release_id = Uuid::now_v7();
-    sqlx::query("INSERT INTO policy_releases (id, application_id, version, schema_source, policies, entities, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7)").bind(release_id).bind(id).bind(version).bind(row.0).bind(row.1).bind(row.2).bind(current.id).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO active_policy_releases (application_id, release_id, activated_by) VALUES ($1, $2, $3) ON CONFLICT (application_id) DO UPDATE SET release_id = EXCLUDED.release_id, activated_by = EXCLUDED.activated_by, activated_at = now()").bind(id).bind(release_id).bind(current.id).execute(&mut *tx).await?;
-    audit(
-        &mut tx,
-        &current,
-        Some(app.organization_id),
-        "policy_release.publish",
-        "policy_release",
-        Some(release_id.to_string()),
-        json!({ "version": version }),
-    )
-    .await?;
-    tx.commit().await?;
+    let release: PolicyReleaseResult = state
+        .db
+        .publish_policy_release(NewPolicyRelease {
+            id: release_id,
+            application_id: id,
+            created_by: current.id,
+            snapshot,
+            audit: AuditEvent {
+                organization_id: Some(app.organization_id),
+                actor_user_id: current.id,
+                action: "policy_release.publish".into(),
+                target_type: "policy_release".into(),
+                target_id: Some(release_id.to_string()),
+                details: json!({}),
+            },
+        })
+        .await?;
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": release_id, "version": version, "active": true })),
+        Json(json!({ "id": release.id, "version": release.version, "active": true })),
     ))
 }
 async fn activate_release(
@@ -864,17 +841,13 @@ async fn activate_release(
     Path((id, release_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
     let (current, app) = authorize_app(&state, &headers, id, true).await?;
-    let exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM policy_releases WHERE id = $1 AND application_id = $2)",
-    )
-    .bind(release_id)
-    .bind(id)
-    .fetch_one(&state.pool)
-    .await?;
-    if !exists {
+    if !state
+        .db
+        .activate_policy_release(id, release_id, current.id)
+        .await?
+    {
         return Err(ApiError::not_found("Release"));
     }
-    sqlx::query("INSERT INTO active_policy_releases (application_id, release_id, activated_by) VALUES ($1, $2, $3) ON CONFLICT (application_id) DO UPDATE SET release_id = EXCLUDED.release_id, activated_by = EXCLUDED.activated_by, activated_at = now()").bind(id).bind(release_id).bind(current.id).execute(&state.pool).await?;
     audit_event(
         &state,
         &current,
@@ -914,18 +887,6 @@ async fn list_audit_logs(
     Ok(Json(rows))
 }
 
-async fn audit(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    current: &Actor,
-    organization_id: Option<Uuid>,
-    action: &str,
-    target_type: &str,
-    target_id: Option<String>,
-    details: Value,
-) -> std::result::Result<(), sqlx::Error> {
-    sqlx::query("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5, $6, $7)").bind(Uuid::now_v7()).bind(organization_id).bind(current.id).bind(action).bind(target_type).bind(target_id).bind(details).execute(&mut **tx).await?;
-    Ok(())
-}
 async fn audit_event(
     state: &AppState,
     current: &Actor,

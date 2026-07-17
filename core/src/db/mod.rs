@@ -2,6 +2,7 @@ mod applications;
 mod audit;
 mod authzen;
 mod oidc;
+mod policies;
 mod sessions;
 mod tenants;
 
@@ -18,6 +19,9 @@ pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttri
 pub(crate) use oidc::{
     AuthorizationApp, AuthorizationCode, AuthorizationCodeExchange, RefreshRotation,
     ServiceCredential, UserGrant, UserProfile,
+};
+pub(crate) use policies::{
+    NewPolicyRelease, PolicyReleaseResult, PolicySnapshot, Release, UpdateWorkspace, Workspace,
 };
 pub(crate) use sessions::{Actor, LoginUser, NewSession};
 pub(crate) use tenants::{
