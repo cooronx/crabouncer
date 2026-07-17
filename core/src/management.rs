@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    db::{Actor, LoginUser, NewSession},
     error::{ApiError, Result},
     policy, security,
 };
@@ -89,25 +90,14 @@ pub(crate) fn routes() -> Router<Arc<AppState>> {
         )
 }
 
-#[derive(Clone, Serialize, FromRow)]
-pub(crate) struct Actor {
-    pub(crate) id: Uuid,
-    pub(crate) organization_id: Uuid,
-    pub(crate) email: String,
-    pub(crate) display_name: String,
-    pub(crate) role: String,
-    pub(crate) is_system_admin: bool,
-    #[serde(skip)]
-    csrf_hash: Vec<u8>,
-    #[serde(skip)]
-    session_hash: Vec<u8>,
-}
-
 pub(crate) async fn actor(state: &AppState, headers: &HeaderMap, mutation: bool) -> Result<Actor> {
     let token = cookie_value(headers, SESSION_COOKIE).ok_or_else(ApiError::unauthorized)?;
     let session_hash = security::token_hash(&token);
-    let current = sqlx::query_as::<_, Actor>("SELECT u.id, u.organization_id, u.email, u.display_name, u.role::text AS role, u.is_system_admin, s.csrf_hash, s.token_hash AS session_hash FROM sessions s JOIN users u ON u.id = s.user_id JOIN organizations o ON o.id = u.organization_id WHERE s.token_hash = $1 AND s.expires_at > now() AND u.status = 'active' AND o.status = 'active'")
-        .bind(session_hash).fetch_optional(&state.pool).await?.ok_or_else(ApiError::unauthorized)?;
+    let current = state
+        .db
+        .actor(session_hash)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
     if mutation {
         let csrf = headers
             .get("x-csrf-token")
@@ -155,19 +145,13 @@ struct Login {
     password: String,
 }
 
-#[derive(FromRow)]
-struct LoginUser {
-    id: Uuid,
-    password_hash: String,
-}
-
 async fn login(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<Login>,
 ) -> Result<impl axum::response::IntoResponse> {
-    let user = sqlx::query_as::<_, LoginUser>("SELECT u.id, p.password_hash FROM users u JOIN password_credentials p ON p.user_id = u.id JOIN organizations o ON o.id = u.organization_id WHERE u.email = $1 AND u.status = 'active' AND o.status = 'active'")
-        .bind(body.email.trim().to_lowercase()).fetch_optional(&state.pool).await?;
+    let email = body.email.trim().to_lowercase();
+    let user: Option<LoginUser> = state.db.login_user(&email).await?;
     let Some(user) = user else {
         return Err(ApiError::unauthorized());
     };
@@ -178,9 +162,20 @@ async fn login(
     let csrf = security::random_token();
     let expires =
         OffsetDateTime::now_utc() + Duration::seconds(state.config.tokens.session_ttl_seconds);
-    sqlx::query("INSERT INTO sessions (token_hash, csrf_hash, user_id, expires_at, ip, user_agent) VALUES ($1, $2, $3, $4, $5::inet, $6)")
-        .bind(security::token_hash(&session)).bind(security::token_hash(&csrf)).bind(user.id).bind(expires)
-        .bind(client_ip(&headers)).bind(headers.get(header::USER_AGENT).and_then(|v| v.to_str().ok())).execute(&state.pool).await?;
+    state
+        .db
+        .create_session(NewSession {
+            token_hash: security::token_hash(&session),
+            csrf_hash: security::token_hash(&csrf),
+            user_id: user.id,
+            expires_at: expires,
+            ip: client_ip(&headers).map(str::to_owned),
+            user_agent: headers
+                .get(header::USER_AGENT)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+        })
+        .await?;
     let cookie = Cookie::build((SESSION_COOKIE, session))
         .path("/")
         .http_only(true)
@@ -201,10 +196,7 @@ async fn logout(
     headers: HeaderMap,
 ) -> Result<impl axum::response::IntoResponse> {
     let current = actor(&state, &headers, true).await?;
-    sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
-        .bind(current.session_hash)
-        .execute(&state.pool)
-        .await?;
+    state.db.delete_session(current.session_hash).await?;
     let cookie = Cookie::build((SESSION_COOKIE, ""))
         .path("/")
         .http_only(true)
@@ -232,16 +224,11 @@ async fn activate(
     Json(body): Json<Activate>,
 ) -> Result<StatusCode> {
     let hash = security::password_hash(&body.password).map_err(ApiError::bad_request)?;
-    let mut tx = state.pool.begin().await?;
-    let user_id: Uuid = sqlx::query_scalar("UPDATE activation_tokens SET used_at = now() WHERE token_hash = $1 AND used_at IS NULL AND expires_at > now() RETURNING user_id")
-        .bind(security::token_hash(&token)).fetch_optional(&mut *tx).await?.ok_or_else(|| ApiError::bad_request("activation token is invalid or expired"))?;
-    sqlx::query("INSERT INTO password_credentials (user_id, password_hash) VALUES ($1, $2) ON CONFLICT (user_id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()")
-        .bind(user_id).bind(hash).execute(&mut *tx).await?;
-    sqlx::query("UPDATE users SET status = 'active', updated_at = now() WHERE id = $1")
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    state
+        .db
+        .activate_user(security::token_hash(&token), hash)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("activation token is invalid or expired"))?;
     Ok(StatusCode::NO_CONTENT)
 }
 

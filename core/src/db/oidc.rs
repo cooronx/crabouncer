@@ -210,12 +210,4 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?)
     }
-
-    pub(crate) async fn delete_session(&self, token_hash: Vec<u8>) -> Result<()> {
-        sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
-            .bind(token_hash)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
 }

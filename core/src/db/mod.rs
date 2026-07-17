@@ -1,5 +1,6 @@
 mod authzen;
 mod oidc;
+mod sessions;
 
 use std::fmt;
 
@@ -10,6 +11,7 @@ pub(crate) use oidc::{
     AuthorizationApp, AuthorizationCode, AuthorizationCodeExchange, RefreshRotation,
     ServiceCredential, UserGrant, UserProfile,
 };
+pub(crate) use sessions::{Actor, LoginUser, NewSession};
 
 #[derive(Clone)]
 pub(crate) struct Database {
