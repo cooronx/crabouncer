@@ -18,6 +18,10 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
+    db::{
+        AuthorizationApp, AuthorizationCode, AuthorizationCodeExchange, RefreshRotation,
+        ServiceCredential, UserGrant, UserProfile,
+    },
     error::{ApiError, Result},
     management,
     security::{self, Claims},
@@ -84,21 +88,16 @@ struct AuthorizationQuery {
     code_challenge_method: String,
 }
 
-#[derive(sqlx::FromRow)]
-struct AuthorizationApp {
-    id: Uuid,
-    organization_id: Uuid,
-    redirect_uris: Value,
-    allowed_scopes: Value,
-}
-
 async fn authorize(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<AuthorizationQuery>,
 ) -> Result<Redirect> {
-    let app = sqlx::query_as::<_, AuthorizationApp>("SELECT id, organization_id, redirect_uris, allowed_scopes FROM applications WHERE client_id = $1 AND enabled")
-        .bind(&query.client_id).fetch_optional(&state.pool).await?.ok_or_else(|| ApiError::bad_request("unknown client_id"))?;
+    let app = state
+        .db
+        .authorization_app(&query.client_id)
+        .await?
+        .ok_or_else(|| ApiError::bad_request("unknown client_id"))?;
     validate_authorization(&query, &app)?;
     let current = match management::actor(&state, &headers, false).await {
         Ok(actor) => actor,
@@ -118,9 +117,20 @@ async fn authorize(
         return Err(ApiError::forbidden());
     }
     let code = security::random_token();
-    sqlx::query("INSERT INTO oauth_authorization_codes (code_hash, application_id, user_id, redirect_uri, scope, code_challenge, nonce, expires_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
-        .bind(security::token_hash(&code)).bind(app.id).bind(current.id).bind(&query.redirect_uri).bind(&query.scope).bind(&query.code_challenge).bind(&query.nonce)
-        .bind(OffsetDateTime::now_utc() + Duration::seconds(state.config.tokens.authorization_code_ttl_seconds)).execute(&state.pool).await?;
+    state
+        .db
+        .store_authorization_code(AuthorizationCode {
+            code_hash: security::token_hash(&code),
+            application_id: app.id,
+            user_id: current.id,
+            redirect_uri: query.redirect_uri.clone(),
+            scope: query.scope.clone(),
+            code_challenge: query.code_challenge.clone(),
+            nonce: query.nonce.clone(),
+            expires_at: OffsetDateTime::now_utc()
+                + Duration::seconds(state.config.tokens.authorization_code_ttl_seconds),
+        })
+        .await?;
     let mut redirect = Url::parse(&query.redirect_uri)
         .map_err(|_| ApiError::bad_request("redirect_uri is invalid"))?;
     redirect.query_pairs_mut().append_pair("code", &code);
@@ -225,17 +235,6 @@ async fn token(
     }
 }
 
-#[derive(sqlx::FromRow)]
-struct CodeRow {
-    application_id: Uuid,
-    user_id: Uuid,
-    redirect_uri: String,
-    scope: String,
-    code_challenge: String,
-    nonce: Option<String>,
-    client_id: String,
-    organization_id: Uuid,
-}
 async fn authorization_code_token(state: &AppState, form: TokenForm) -> Result<TokenResponse> {
     let code = form
         .code
@@ -246,79 +245,62 @@ async fn authorization_code_token(state: &AppState, form: TokenForm) -> Result<T
     let redirect = form
         .redirect_uri
         .ok_or_else(|| ApiError::bad_request("redirect_uri is required"))?;
-    let mut tx = state.pool.begin().await?;
-    let row = sqlx::query_as::<_, CodeRow>("UPDATE oauth_authorization_codes c SET consumed_at = now() FROM applications a WHERE c.application_id = a.id AND c.code_hash = $1 AND c.consumed_at IS NULL AND c.expires_at > now() RETURNING c.application_id, c.user_id, c.redirect_uri, c.scope, c.code_challenge, c.nonce, a.client_id, a.organization_id")
-        .bind(security::token_hash(&code)).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::unauthorized)?;
-    if row.redirect_uri != redirect || security::pkce_challenge(&verifier) != row.code_challenge {
-        return Err(ApiError::unauthorized());
-    }
     let refresh = security::random_token();
     let family = Uuid::now_v7();
-    sqlx::query("INSERT INTO oauth_refresh_tokens (token_hash, family_id, application_id, user_id, scope, expires_at) VALUES ($1, $2, $3, $4, $5, $6)").bind(security::token_hash(&refresh)).bind(family).bind(row.application_id).bind(row.user_id).bind(&row.scope).bind(OffsetDateTime::now_utc() + Duration::seconds(state.config.tokens.refresh_ttl_seconds)).execute(&mut *tx).await?;
-    tx.commit().await?;
+    let grant: UserGrant = state
+        .db
+        .exchange_authorization_code(AuthorizationCodeExchange {
+            code_hash: security::token_hash(&code),
+            redirect_uri: redirect,
+            code_challenge: security::pkce_challenge(&verifier),
+            refresh_hash: security::token_hash(&refresh),
+            refresh_family_id: family,
+            refresh_expires_at: OffsetDateTime::now_utc()
+                + Duration::seconds(state.config.tokens.refresh_ttl_seconds),
+        })
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
     user_tokens(
         state,
-        row.user_id,
-        row.organization_id,
-        &row.client_id,
-        row.scope,
-        row.nonce,
+        grant.user_id,
+        grant.organization_id,
+        &grant.client_id,
+        grant.scope,
+        grant.nonce,
         Some(refresh),
     )
 }
 
-#[derive(sqlx::FromRow)]
-struct RefreshRow {
-    family_id: Uuid,
-    application_id: Uuid,
-    user_id: Uuid,
-    scope: String,
-    consumed_at: Option<OffsetDateTime>,
-    client_id: String,
-    organization_id: Uuid,
-}
 async fn refresh_token(state: &AppState, form: TokenForm) -> Result<TokenResponse> {
     let old = form
         .refresh_token
         .ok_or_else(|| ApiError::bad_request("refresh_token is required"))?;
-    let mut tx = state.pool.begin().await?;
-    let row = sqlx::query_as::<_, RefreshRow>("SELECT r.family_id, r.application_id, r.user_id, r.scope, r.consumed_at, a.client_id, a.organization_id FROM oauth_refresh_tokens r JOIN applications a ON a.id = r.application_id JOIN users u ON u.id = r.user_id JOIN organizations o ON o.id = u.organization_id WHERE r.token_hash = $1 AND r.revoked_at IS NULL AND r.expires_at > now() AND u.status = 'active' AND o.status = 'active' AND a.enabled FOR UPDATE OF r")
-        .bind(security::token_hash(&old)).fetch_optional(&mut *tx).await?.ok_or_else(ApiError::unauthorized)?;
-    if row.consumed_at.is_some() {
-        sqlx::query("UPDATE oauth_refresh_tokens SET revoked_at = now() WHERE family_id = $1")
-            .bind(row.family_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-        return Err(ApiError::unauthorized());
-    }
-    sqlx::query("UPDATE oauth_refresh_tokens SET consumed_at = now() WHERE token_hash = $1")
-        .bind(security::token_hash(&old))
-        .execute(&mut *tx)
-        .await?;
     let fresh = security::random_token();
-    sqlx::query("INSERT INTO oauth_refresh_tokens (token_hash, family_id, application_id, user_id, scope, expires_at) VALUES ($1, $2, $3, $4, $5, $6)").bind(security::token_hash(&fresh)).bind(row.family_id).bind(row.application_id).bind(row.user_id).bind(&row.scope).bind(OffsetDateTime::now_utc() + Duration::seconds(state.config.tokens.refresh_ttl_seconds)).execute(&mut *tx).await?;
-    tx.commit().await?;
+    let grant: UserGrant = match state
+        .db
+        .rotate_refresh_token(
+            security::token_hash(&old),
+            security::token_hash(&fresh),
+            OffsetDateTime::now_utc() + Duration::seconds(state.config.tokens.refresh_ttl_seconds),
+        )
+        .await?
+    {
+        RefreshRotation::Rotated(grant) => grant,
+        RefreshRotation::Missing | RefreshRotation::Reused => {
+            return Err(ApiError::unauthorized());
+        }
+    };
     user_tokens(
         state,
-        row.user_id,
-        row.organization_id,
-        &row.client_id,
-        row.scope,
+        grant.user_id,
+        grant.organization_id,
+        &grant.client_id,
+        grant.scope,
         None,
         Some(fresh),
     )
 }
 
-#[derive(sqlx::FromRow)]
-struct ServiceRow {
-    id: Uuid,
-    application_id: Uuid,
-    client_id: String,
-    scopes: Value,
-    secret_hash: String,
-    organization_id: Uuid,
-}
 async fn client_credentials(state: &AppState, form: TokenForm) -> Result<TokenResponse> {
     let client_id = form
         .client_id
@@ -326,8 +308,7 @@ async fn client_credentials(state: &AppState, form: TokenForm) -> Result<TokenRe
     let secret = form
         .client_secret
         .ok_or_else(|| ApiError::bad_request("client_secret is required"))?;
-    let candidates = sqlx::query_as::<_, ServiceRow>("SELECT s.id, s.application_id, s.client_id, s.scopes, k.secret_hash, a.organization_id FROM service_accounts s JOIN service_account_secrets k ON k.service_account_id = s.id JOIN applications a ON a.id = s.application_id JOIN organizations o ON o.id = a.organization_id WHERE s.client_id = $1 AND s.enabled AND a.enabled AND o.status = 'active' AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())")
-        .bind(&client_id).fetch_all(&state.pool).await?;
+    let candidates: Vec<ServiceCredential> = state.db.service_credentials(&client_id).await?;
     let row = candidates
         .into_iter()
         .find(|row| security::password_matches(&secret, &row.secret_hash))
@@ -457,23 +438,19 @@ async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Res
         return Err(ApiError::forbidden());
     }
     let id = Uuid::parse_str(&claims.sub).map_err(|_| ApiError::unauthorized())?;
-    let row: (String, String) =
-        sqlx::query_as("SELECT email, display_name FROM users WHERE id = $1 AND status = 'active'")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?
-            .ok_or_else(ApiError::unauthorized)?;
+    let row: UserProfile = state
+        .db
+        .active_user_profile(id)
+        .await?
+        .ok_or_else(ApiError::unauthorized)?;
     Ok(Json(
-        json!({ "sub": claims.sub, "organization_id": claims.organization_id, "email": row.0, "name": row.1 }),
+        json!({ "sub": claims.sub, "organization_id": claims.organization_id, "email": row.email, "name": row.display_name }),
     ))
 }
 
 async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Some(raw) = cookie_value(&headers, "crabouncer_session") {
-        let _ = sqlx::query("DELETE FROM sessions WHERE token_hash = $1")
-            .bind(security::token_hash(&raw))
-            .execute(&state.pool)
-            .await;
+        let _ = state.db.delete_session(security::token_hash(&raw)).await;
     }
     let cookie = Cookie::build(("crabouncer_session", ""))
         .path("/")

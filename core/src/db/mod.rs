@@ -1,10 +1,15 @@
 mod authzen;
+mod oidc;
 
 use std::fmt;
 
 use sqlx::PgPool;
 
 pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttributes};
+pub(crate) use oidc::{
+    AuthorizationApp, AuthorizationCode, AuthorizationCodeExchange, RefreshRotation,
+    ServiceCredential, UserGrant, UserProfile,
+};
 
 #[derive(Clone)]
 pub(crate) struct Database {
