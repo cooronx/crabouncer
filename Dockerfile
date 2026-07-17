@@ -2,8 +2,6 @@ FROM rust:1.88-bookworm AS builder
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY core ./core
-COPY protocol ./protocol
-COPY sdk ./sdk
 RUN cargo build --release -p crabouncer-core
 
 FROM debian:bookworm-slim
