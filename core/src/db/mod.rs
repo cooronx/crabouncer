@@ -1,3 +1,4 @@
+mod applications;
 mod audit;
 mod authzen;
 mod oidc;
@@ -8,6 +9,10 @@ use std::fmt;
 
 use sqlx::PgPool;
 
+pub(crate) use applications::{
+    Application, NewApplication, NewServiceAccount, NewServiceSecret, ServiceAccount,
+    UpdateApplication,
+};
 pub(crate) use audit::AuditEvent;
 pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttributes};
 pub(crate) use oidc::{

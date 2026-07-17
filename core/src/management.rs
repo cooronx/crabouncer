@@ -16,9 +16,11 @@ use uuid::Uuid;
 use crate::{
     AppState,
     db::{
-        ActivationToken, Actor, AuditEvent, LoginUser, NewOrganization, NewSession, NewUser,
-        Organization, UpdateOrganization as DatabaseUpdateOrganization,
-        UpdateUser as DatabaseUpdateUser, User, UserAccess,
+        ActivationToken, Actor, Application, AuditEvent, LoginUser, NewApplication,
+        NewOrganization, NewServiceAccount, NewServiceSecret, NewSession, NewUser, Organization,
+        ServiceAccount, UpdateApplication as DatabaseUpdateApplication,
+        UpdateOrganization as DatabaseUpdateOrganization, UpdateUser as DatabaseUpdateUser, User,
+        UserAccess,
     },
     error::{ApiError, Result},
     policy, security,
@@ -467,27 +469,20 @@ async fn update_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize, FromRow)]
-pub(crate) struct ApplicationView {
-    pub(crate) id: Uuid,
-    pub(crate) organization_id: Uuid,
-    name: String,
-    pub(crate) client_id: String,
-    redirect_uris: Value,
-    allowed_scopes: Value,
-    pub(crate) enabled: bool,
-    created_at: OffsetDateTime,
-}
-pub(crate) async fn load_application(state: &AppState, id: Uuid) -> Result<ApplicationView> {
-    sqlx::query_as("SELECT id, organization_id, name, client_id, redirect_uris, allowed_scopes, enabled, created_at FROM applications WHERE id = $1").bind(id).fetch_optional(&state.pool).await?.ok_or_else(|| ApiError::not_found("Application"))
+pub(crate) async fn load_application(state: &AppState, id: Uuid) -> Result<Application> {
+    state
+        .db
+        .application(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Application"))
 }
 async fn list_applications(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<ApplicationView>>> {
+) -> Result<Json<Vec<Application>>> {
     can_view(&actor(&state, &headers, false).await?, id)?;
-    Ok(Json(sqlx::query_as("SELECT id, organization_id, name, client_id, redirect_uris, allowed_scopes, enabled, created_at FROM applications WHERE organization_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.pool).await?))
+    Ok(Json(state.db.applications(id).await?))
 }
 #[derive(Deserialize)]
 struct ApplicationInput {
@@ -500,29 +495,31 @@ async fn create_application(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
     Json(body): Json<ApplicationInput>,
-) -> Result<(StatusCode, Json<ApplicationView>)> {
+) -> Result<(StatusCode, Json<Application>)> {
     let current = actor(&state, &headers, true).await?;
     can_manage(&current, id)?;
     validate_application(&body)?;
     let app_id = Uuid::now_v7();
     let client_id = format!("app_{}", security::random_token());
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("INSERT INTO applications (id, organization_id, name, client_id, redirect_uris, allowed_scopes) VALUES ($1, $2, $3, $4, $5, $6)").bind(app_id).bind(id).bind(body.name.trim()).bind(client_id).bind(json!(body.redirect_uris)).bind(json!(body.allowed_scopes)).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO policy_workspaces (application_id) VALUES ($1)")
-        .bind(app_id)
-        .execute(&mut *tx)
+    state
+        .db
+        .create_application(NewApplication {
+            id: app_id,
+            organization_id: id,
+            name: body.name.trim().into(),
+            client_id,
+            redirect_uris: json!(body.redirect_uris),
+            allowed_scopes: json!(body.allowed_scopes),
+            audit: AuditEvent {
+                organization_id: Some(id),
+                actor_user_id: current.id,
+                action: "application.create".into(),
+                target_type: "application".into(),
+                target_id: Some(app_id.to_string()),
+                details: json!({}),
+            },
+        })
         .await?;
-    audit(
-        &mut tx,
-        &current,
-        Some(id),
-        "application.create",
-        "application",
-        Some(app_id.to_string()),
-        json!({}),
-    )
-    .await?;
-    tx.commit().await?;
     Ok((
         StatusCode::CREATED,
         Json(load_application(&state, app_id).await?),
@@ -532,7 +529,7 @@ async fn get_application(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<ApplicationView>> {
+) -> Result<Json<Application>> {
     let app = load_application(&state, id).await?;
     can_view(&actor(&state, &headers, false).await?, app.organization_id)?;
     Ok(Json(app))
@@ -559,8 +556,16 @@ async fn update_application(
     if let Some(uris) = &body.redirect_uris {
         validate_redirects(uris)?;
     }
-    sqlx::query("UPDATE applications SET name = COALESCE($2, name), redirect_uris = COALESCE($3, redirect_uris), allowed_scopes = COALESCE($4, allowed_scopes), enabled = COALESCE($5, enabled), updated_at = now() WHERE id = $1")
-        .bind(id).bind(body.name.as_deref().map(str::trim)).bind(body.redirect_uris.map(|v| json!(v))).bind(body.allowed_scopes.map(|v| json!(v))).bind(body.enabled).execute(&state.pool).await?;
+    state
+        .db
+        .update_application(DatabaseUpdateApplication {
+            id,
+            name: body.name.map(|value| value.trim().into()),
+            redirect_uris: body.redirect_uris.map(|value| json!(value)),
+            allowed_scopes: body.allowed_scopes.map(|value| json!(value)),
+            enabled: body.enabled,
+        })
+        .await?;
     audit_event(
         &state,
         &current,
@@ -573,24 +578,14 @@ async fn update_application(
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Serialize, FromRow)]
-struct ServiceAccountView {
-    id: Uuid,
-    application_id: Uuid,
-    name: String,
-    client_id: String,
-    scopes: Value,
-    enabled: bool,
-    created_at: OffsetDateTime,
-}
 async fn list_service_accounts(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-) -> Result<Json<Vec<ServiceAccountView>>> {
+) -> Result<Json<Vec<ServiceAccount>>> {
     let app = load_application(&state, id).await?;
     can_view(&actor(&state, &headers, false).await?, app.organization_id)?;
-    Ok(Json(sqlx::query_as("SELECT id, application_id, name, client_id, scopes, enabled, created_at FROM service_accounts WHERE application_id = $1 ORDER BY created_at").bind(id).fetch_all(&state.pool).await?))
+    Ok(Json(state.db.service_accounts(id).await?))
 }
 #[derive(Deserialize)]
 struct CreateServiceAccount {
@@ -612,10 +607,18 @@ async fn create_service_account(
     let secret = security::random_token();
     let secret_id = Uuid::now_v7();
     let hash = security::password_hash(&secret).map_err(ApiError::bad_request)?;
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("INSERT INTO service_accounts (id, application_id, name, client_id, scopes) VALUES ($1, $2, $3, $4, $5)").bind(account_id).bind(id).bind(body.name.trim()).bind(&client_id).bind(json!(body.scopes)).execute(&mut *tx).await?;
-    sqlx::query("INSERT INTO service_account_secrets (id, service_account_id, secret_hash) VALUES ($1, $2, $3)").bind(secret_id).bind(account_id).bind(hash).execute(&mut *tx).await?;
-    tx.commit().await?;
+    state
+        .db
+        .create_service_account(NewServiceAccount {
+            id: account_id,
+            application_id: id,
+            name: body.name.trim().into(),
+            client_id: client_id.clone(),
+            scopes: json!(body.scopes),
+            secret_id,
+            secret_hash: hash,
+        })
+        .await?;
     audit_event(
         &state,
         &current,
@@ -633,7 +636,11 @@ async fn create_service_account(
     ))
 }
 async fn service_account_org(state: &AppState, id: Uuid) -> Result<Uuid> {
-    sqlx::query_scalar("SELECT a.organization_id FROM service_accounts s JOIN applications a ON a.id = s.application_id WHERE s.id = $1").bind(id).fetch_optional(&state.pool).await?.ok_or_else(|| ApiError::not_found("Service account"))
+    state
+        .db
+        .service_account_organization(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Service account"))
 }
 async fn create_service_secret(
     State(state): State<Arc<AppState>>,
@@ -646,7 +653,14 @@ async fn create_service_secret(
     let secret = security::random_token();
     let secret_id = Uuid::now_v7();
     let hash = security::password_hash(&secret).map_err(ApiError::bad_request)?;
-    sqlx::query("INSERT INTO service_account_secrets (id, service_account_id, secret_hash) VALUES ($1, $2, $3)").bind(secret_id).bind(id).bind(hash).execute(&state.pool).await?;
+    state
+        .db
+        .create_service_secret(NewServiceSecret {
+            id: secret_id,
+            service_account_id: id,
+            secret_hash: hash,
+        })
+        .await?;
     audit_event(
         &state,
         &current,
@@ -666,13 +680,14 @@ async fn revoke_service_secret(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode> {
-    let org: Uuid = sqlx::query_scalar("SELECT a.organization_id FROM service_account_secrets k JOIN service_accounts s ON s.id = k.service_account_id JOIN applications a ON a.id = s.application_id WHERE k.id = $1").bind(id).fetch_optional(&state.pool).await?.ok_or_else(|| ApiError::not_found("Secret"))?;
+    let org = state
+        .db
+        .service_secret_organization(id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Secret"))?;
     let current = actor(&state, &headers, true).await?;
     can_manage(&current, org)?;
-    sqlx::query("UPDATE service_account_secrets SET revoked_at = now() WHERE id = $1")
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
+    state.db.revoke_service_secret(id).await?;
     audit_event(
         &state,
         &current,
@@ -698,7 +713,7 @@ async fn authorize_app(
     headers: &HeaderMap,
     id: Uuid,
     mutation: bool,
-) -> Result<(Actor, ApplicationView)> {
+) -> Result<(Actor, Application)> {
     let app = load_application(state, id).await?;
     let current = actor(state, headers, mutation).await?;
     if mutation {
