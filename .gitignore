@@ -26,3 +26,6 @@
 *.swo
 .DS_Store
 Thumbs.db
+
+# chore
+chore_docs/
