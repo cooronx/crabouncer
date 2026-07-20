@@ -1,4 +1,5 @@
 FROM node:24-alpine AS builder
+ENV NODE_USE_ENV_PROXY=1
 WORKDIR /app
 RUN corepack enable
 COPY package.json pnpm-lock.yaml ./

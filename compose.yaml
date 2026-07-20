@@ -24,7 +24,14 @@ services:
         openssl pkey -in /keys/private.pem -pubout -out /keys/public.pem)
 
   core:
-    build: .
+    build:
+      context: .
+      network: host
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     environment:
       CRABOUNCER_BOOTSTRAP_PASSWORD: ${CRABOUNCER_BOOTSTRAP_PASSWORD:-development-only-password}
       RUST_LOG: ${RUST_LOG:-info,tower_http=info}
@@ -37,7 +44,14 @@ services:
         condition: service_completed_successfully
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      network: host
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        ALL_PROXY: ${ALL_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     ports:
       - "8080:80"
     depends_on:
