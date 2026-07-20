@@ -19,7 +19,7 @@ use crate::{
 
 pub(super) const SESSION_COOKIE: &str = "crabouncer_session";
 
-pub(crate) async fn session_actor(state: &AppState, headers: &HeaderMap) -> Result<Actor> {
+pub(in crate::api) async fn session_actor(state: &AppState, headers: &HeaderMap) -> Result<Actor> {
     let token = cookie_value(headers, SESSION_COOKIE).ok_or_else(ApiError::unauthorized)?;
     let session_hash = security::token_hash(&token);
     state

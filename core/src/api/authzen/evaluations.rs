@@ -12,10 +12,9 @@ use authzen_rs::{
     server::PolicyDecisionPoint,
 };
 use axum::{
-    Json, Router,
+    Json,
     extract::State,
     http::{HeaderMap, header},
-    routing::{get, post},
 };
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
@@ -26,20 +25,6 @@ use crate::{
     error::{ApiError, Result},
     policy,
 };
-
-pub(crate) fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/.well-known/authzen-configuration", get(metadata))
-        .route("/access/v1/evaluation", post(evaluate_one))
-        .route("/access/v1/evaluations", post(evaluate_many))
-}
-
-async fn metadata(State(state): State<Arc<AppState>>) -> Json<Value> {
-    let base = state.config.server.public_url.trim_end_matches('/');
-    Json(
-        json!({ "policy_decision_point": base, "access_evaluation_endpoint": format!("{base}/access/v1/evaluation"), "access_evaluations_endpoint": format!("{base}/access/v1/evaluations") }),
-    )
-}
 
 #[derive(Clone)]
 struct CrabouncerPdp {
@@ -133,7 +118,7 @@ async fn caller(state: &AppState, headers: &HeaderMap) -> Result<AuthzenCaller> 
     Ok(row)
 }
 
-async fn evaluate_one(
+pub(super) async fn evaluate_one(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<EvaluationRequest>,
@@ -147,7 +132,7 @@ async fn evaluate_one(
     Ok(Json(pdp.evaluate(request).await?))
 }
 
-async fn evaluate_many(
+pub(super) async fn evaluate_many(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(batch): Json<EvaluationsRequest>,

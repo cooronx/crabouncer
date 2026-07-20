@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension, Json, Router,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, patch},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -27,24 +26,7 @@ use super::{
     validation,
 };
 
-pub(super) fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/organizations",
-            get(list_organizations).post(create_organization),
-        )
-        .route(
-            "/api/v1/organizations/{id}",
-            get(get_organization).patch(update_organization),
-        )
-        .route(
-            "/api/v1/organizations/{id}/users",
-            get(list_users).post(create_user),
-        )
-        .route("/api/v1/users/{id}", patch(update_user))
-}
-
-async fn list_organizations(
+pub(super) async fn list_organizations(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
 ) -> Result<Json<Vec<Organization>>> {
@@ -56,14 +38,14 @@ async fn list_organizations(
 }
 
 #[derive(Deserialize)]
-struct CreateOrganization {
+pub(super) struct CreateOrganization {
     name: String,
     display_name: String,
     owner_email: String,
     owner_display_name: String,
 }
 
-async fn create_organization(
+pub(super) async fn create_organization(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Json(body): Json<CreateOrganization>,
@@ -111,7 +93,7 @@ async fn create_organization(
     ))
 }
 
-async fn get_organization(
+pub(super) async fn get_organization(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -127,12 +109,12 @@ async fn get_organization(
 }
 
 #[derive(Deserialize)]
-struct UpdateOrganization {
+pub(super) struct UpdateOrganization {
     display_name: Option<String>,
     status: Option<String>,
 }
 
-async fn update_organization(
+pub(super) async fn update_organization(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -166,7 +148,7 @@ async fn update_organization(
     get_organization(State(state), Extension(current), Path(id)).await
 }
 
-async fn list_users(
+pub(super) async fn list_users(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -176,13 +158,13 @@ async fn list_users(
 }
 
 #[derive(Deserialize)]
-struct CreateUser {
+pub(super) struct CreateUser {
     email: String,
     display_name: String,
     role: String,
 }
 
-async fn create_user(
+pub(super) async fn create_user(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -229,13 +211,13 @@ async fn create_user(
 }
 
 #[derive(Deserialize)]
-struct UpdateUser {
+pub(super) struct UpdateUser {
     display_name: Option<String>,
     role: Option<String>,
     status: Option<String>,
 }
 
-async fn update_user(
+pub(super) async fn update_user(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,

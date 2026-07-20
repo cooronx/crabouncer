@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension, Json, Router,
+    Extension, Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode, header},
-    routing::{get, post},
 };
 use cookie::{Cookie, SameSite};
 use serde::Deserialize;
@@ -20,25 +19,13 @@ use crate::{
 
 use super::access::SESSION_COOKIE;
 
-pub(super) fn public_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/session", post(login))
-        .route("/api/v1/activations/{token}", post(activate))
-}
-
-pub(super) fn protected_routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/v1/session", axum::routing::delete(logout))
-        .route("/api/v1/session/me", get(me))
-}
-
 #[derive(Deserialize)]
-struct Login {
+pub(super) struct Login {
     email: String,
     password: String,
 }
 
-async fn login(
+pub(super) async fn login(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(body): Json<Login>,
@@ -84,7 +71,7 @@ async fn login(
     ))
 }
 
-async fn logout(
+pub(super) async fn logout(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
 ) -> Result<impl axum::response::IntoResponse> {
@@ -102,16 +89,16 @@ async fn logout(
     ))
 }
 
-async fn me(Extension(current): Extension<Actor>) -> Json<Actor> {
+pub(super) async fn me(Extension(current): Extension<Actor>) -> Json<Actor> {
     Json(current)
 }
 
 #[derive(Deserialize)]
-struct Activate {
+pub(super) struct Activate {
     password: String,
 }
 
-async fn activate(
+pub(super) async fn activate(
     State(state): State<Arc<AppState>>,
     Path(token): Path<String>,
     Json(body): Json<Activate>,

@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension, Json, Router,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    routing::{delete, get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -24,30 +23,6 @@ use super::{
     access::{audit_event, can_manage, can_view},
     validation,
 };
-
-pub(super) fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/organizations/{id}/applications",
-            get(list_applications).post(create_application),
-        )
-        .route(
-            "/api/v1/applications/{id}",
-            get(get_application).patch(update_application),
-        )
-        .route(
-            "/api/v1/applications/{id}/service-accounts",
-            get(list_service_accounts).post(create_service_account),
-        )
-        .route(
-            "/api/v1/service-accounts/{id}/secrets",
-            post(create_service_secret),
-        )
-        .route(
-            "/api/v1/service-secrets/{id}",
-            delete(revoke_service_secret),
-        )
-}
 
 pub(super) async fn load_application(state: &AppState, id: Uuid) -> Result<Application> {
     state
@@ -77,7 +52,7 @@ pub(super) async fn manage_application(
     Ok(application)
 }
 
-async fn list_applications(
+pub(super) async fn list_applications(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -87,13 +62,13 @@ async fn list_applications(
 }
 
 #[derive(Deserialize)]
-struct ApplicationInput {
+pub(super) struct ApplicationInput {
     name: String,
     redirect_uris: Vec<String>,
     allowed_scopes: Vec<String>,
 }
 
-async fn create_application(
+pub(super) async fn create_application(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -128,7 +103,7 @@ async fn create_application(
     ))
 }
 
-async fn get_application(
+pub(super) async fn get_application(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -139,14 +114,14 @@ async fn get_application(
 }
 
 #[derive(Deserialize)]
-struct UpdateApplication {
+pub(super) struct UpdateApplication {
     name: Option<String>,
     redirect_uris: Option<Vec<String>>,
     allowed_scopes: Option<Vec<String>>,
     enabled: Option<bool>,
 }
 
-async fn update_application(
+pub(super) async fn update_application(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -182,7 +157,7 @@ async fn update_application(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_service_accounts(
+pub(super) async fn list_service_accounts(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -193,12 +168,12 @@ async fn list_service_accounts(
 }
 
 #[derive(Deserialize)]
-struct CreateServiceAccount {
+pub(super) struct CreateServiceAccount {
     name: String,
     scopes: Vec<String>,
 }
 
-async fn create_service_account(
+pub(super) async fn create_service_account(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -252,7 +227,7 @@ async fn service_account_organization(state: &AppState, id: Uuid) -> Result<Uuid
         .ok_or_else(|| ApiError::not_found("Service account"))
 }
 
-async fn create_service_secret(
+pub(super) async fn create_service_secret(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -285,7 +260,7 @@ async fn create_service_secret(
     ))
 }
 
-async fn revoke_service_secret(
+pub(super) async fn revoke_service_secret(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,

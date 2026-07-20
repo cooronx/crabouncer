@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension, Json, Router,
+    Extension, Json,
     extract::{Path, Query, State},
-    routing::get,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -13,24 +12,12 @@ use crate::{AppState, db::Actor, error::Result};
 
 use super::access::can_view;
 
-pub(super) fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/organizations/{id}/decision-logs",
-            get(list_decision_logs),
-        )
-        .route(
-            "/api/v1/organizations/{id}/audit-logs",
-            get(list_audit_logs),
-        )
-}
-
 #[derive(Deserialize, Default)]
-struct LogQuery {
+pub(super) struct LogQuery {
     limit: Option<i64>,
 }
 
-async fn list_decision_logs(
+pub(super) async fn list_decision_logs(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -41,7 +28,7 @@ async fn list_decision_logs(
     Ok(Json(state.db.decision_logs(id, limit).await?))
 }
 
-async fn list_audit_logs(
+pub(super) async fn list_audit_logs(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,

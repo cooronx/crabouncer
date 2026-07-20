@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use axum::{
-    Extension, Json, Router,
+    Extension, Json,
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -25,31 +24,7 @@ use super::{
     applications::{manage_application, view_application},
 };
 
-pub(super) fn routes() -> Router<Arc<AppState>> {
-    Router::new()
-        .route(
-            "/api/v1/applications/{id}/workspace",
-            get(get_workspace).put(update_workspace),
-        )
-        .route(
-            "/api/v1/applications/{id}/workspace/validate",
-            post(validate_workspace),
-        )
-        .route(
-            "/api/v1/applications/{id}/workspace/simulate",
-            post(simulate_workspace),
-        )
-        .route(
-            "/api/v1/applications/{id}/releases",
-            get(list_releases).post(publish_release),
-        )
-        .route(
-            "/api/v1/applications/{id}/releases/{release_id}/activate",
-            post(activate_release),
-        )
-}
-
-async fn get_workspace(
+pub(super) async fn get_workspace(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -59,13 +34,13 @@ async fn get_workspace(
 }
 
 #[derive(Deserialize)]
-struct WorkspaceInput {
+pub(super) struct WorkspaceInput {
     schema_source: String,
     policies: Value,
     entities: Value,
 }
 
-async fn update_workspace(
+pub(super) async fn update_workspace(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -98,7 +73,7 @@ async fn update_workspace(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn validate_workspace(
+pub(super) async fn validate_workspace(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -113,7 +88,7 @@ async fn validate_workspace(
     Ok(Json(json!({ "valid": true })))
 }
 
-async fn simulate_workspace(
+pub(super) async fn simulate_workspace(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -131,7 +106,7 @@ async fn simulate_workspace(
     )?))
 }
 
-async fn list_releases(
+pub(super) async fn list_releases(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -140,7 +115,7 @@ async fn list_releases(
     Ok(Json(state.db.releases(id).await?))
 }
 
-async fn publish_release(
+pub(super) async fn publish_release(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
@@ -180,7 +155,7 @@ async fn publish_release(
     ))
 }
 
-async fn activate_release(
+pub(super) async fn activate_release(
     State(state): State<Arc<AppState>>,
     Extension(current): Extension<Actor>,
     Path((id, release_id)): Path<(Uuid, Uuid)>,
