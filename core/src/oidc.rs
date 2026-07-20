@@ -99,7 +99,7 @@ async fn authorize(
         .await?
         .ok_or_else(|| ApiError::bad_request("unknown client_id"))?;
     validate_authorization(&query, &app)?;
-    let current = match management::actor(&state, &headers, false).await {
+    let current = match management::session_actor(&state, &headers).await {
         Ok(actor) => actor,
         Err(_) => {
             let mut login = Url::parse(&format!(

@@ -47,7 +47,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let request_id = axum::http::HeaderName::from_static("x-request-id");
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
-        .merge(management::routes())
+        .merge(management::routes(state.clone()))
         .merge(oidc::routes())
         .merge(authzen::routes())
         .with_state(state)
