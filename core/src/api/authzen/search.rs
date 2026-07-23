@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use authzen_rs::{
     Action, ActionSearchRequest, EvaluationRequest, PageRequest, PageResponse, Resource,
@@ -13,9 +13,9 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    db::{AuthzenCaller, PolicyRelease, SearchLog, StoredResource},
+    db::{AuthorizationIdentity, AuthzenCaller, PolicyRelease, SearchLog, StoredResource},
     error::{ApiError, Result},
-    policy,
+    iam, policy,
     security::{self, SearchPageClaims},
 };
 
@@ -27,6 +27,7 @@ const LOGGED_RESULT_IDS: usize = 20;
 
 struct PageState {
     release: PolicyRelease,
+    iam_ready: bool,
     query_hash: String,
     cursor: String,
     limit: usize,
@@ -111,6 +112,16 @@ async fn execute_subject_search(
             "subject search currently supports only User",
         ));
     }
+    let action = request
+        .action()
+        .ok_or_else(|| ApiError::bad_request("action is required"))?;
+    let resource = request
+        .resource()
+        .ok_or_else(|| ApiError::bad_request("resource is required"))?;
+    let resource_type = resource
+        .resource_type()
+        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
+    iam::validate_business_resource_type(resource_type)?;
     let Some(page) = resolve_page(
         state,
         caller,
@@ -134,13 +145,23 @@ async fn execute_subject_search(
         .db
         .active_subjects_after(caller.organization_id, cursor, (SCAN_LIMIT + 1) as i64)
         .await?;
-    let action = request
-        .action()
-        .ok_or_else(|| ApiError::bad_request("action is required"))?;
-    let resource = request
-        .resource()
-        .ok_or_else(|| ApiError::bad_request("resource is required"))?;
     let context = request.context().cloned().unwrap_or_default();
+    let candidate_ids = candidates
+        .iter()
+        .take(SCAN_LIMIT)
+        .map(|candidate| candidate.id)
+        .collect::<Vec<_>>();
+    let identities = state
+        .db
+        .authorization_identities(
+            caller.application_id,
+            caller.organization_id,
+            &candidate_ids,
+        )
+        .await?
+        .into_iter()
+        .map(|identity| (identity.user_id, identity))
+        .collect::<HashMap<_, _>>();
     let mut results = Vec::new();
     let mut result_ids = Vec::new();
     let mut evaluated = 0;
@@ -149,9 +170,15 @@ async fn execute_subject_search(
     for candidate in candidates.iter().take(SCAN_LIMIT) {
         evaluated += 1;
         last_key = candidate.id.to_string();
+        let Some(identity) = identities.get(&candidate.id) else {
+            continue;
+        };
         let properties = Map::from_iter([
-            ("email".into(), Value::String(candidate.email.clone())),
-            ("role".into(), Value::String(candidate.role.clone())),
+            ("email".into(), Value::String(identity.email.clone())),
+            (
+                "role".into(),
+                Value::String(identity.organization_role.clone()),
+            ),
             (
                 "organization_id".into(),
                 Value::String(caller.organization_id.to_string()),
@@ -164,11 +191,18 @@ async fn execute_subject_search(
         subject.properties_mut().extend(properties.clone());
         let evaluation = EvaluationRequest::new(subject.clone(), action.clone(), resource.clone())
             .with_context(context.clone());
+        let projection = iam::project_identity(
+            identity,
+            caller.organization_id,
+            caller.application_id,
+            &properties,
+            page.iam_ready,
+        );
         if is_allowed(
             &page.release,
             &evaluation,
             caller.organization_id,
-            Some(Value::Object(properties)),
+            projection.entities,
         )? {
             result_ids.push(candidate.id.to_string());
             results.push(subject);
@@ -197,6 +231,13 @@ async fn execute_resource_search(
     request
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let query = request
+        .resource()
+        .ok_or_else(|| ApiError::bad_request("resource is required"))?;
+    let resource_type = query
+        .resource_type()
+        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
+    iam::validate_business_resource_type(resource_type)?;
     let Some(page) = resolve_page(
         state,
         caller,
@@ -211,7 +252,7 @@ async fn execute_resource_search(
     let subject = request
         .subject()
         .ok_or_else(|| ApiError::bad_request("subject is required"))?;
-    let Some(authoritative) = authoritative_subject(state, caller, subject).await? else {
+    let Some(identity) = authoritative_identity(state, caller, subject).await? else {
         return Ok(SearchExecution {
             response: SearchResponse::new(Vec::new())
                 .with_page(PageResponse::new("").with_count(0)),
@@ -223,12 +264,6 @@ async fn execute_resource_search(
     let action = request
         .action()
         .ok_or_else(|| ApiError::bad_request("action is required"))?;
-    let query = request
-        .resource()
-        .ok_or_else(|| ApiError::bad_request("resource is required"))?;
-    let resource_type = query
-        .resource_type()
-        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
     let candidates = state
         .db
         .resources_after(
@@ -239,6 +274,13 @@ async fn execute_resource_search(
         )
         .await?;
     let context = request.context().cloned().unwrap_or_default();
+    let projection = iam::project_identity(
+        &identity,
+        caller.organization_id,
+        caller.application_id,
+        subject.properties(),
+        page.iam_ready,
+    );
     let mut results = Vec::new();
     let mut result_ids = Vec::new();
     let mut evaluated = 0;
@@ -262,7 +304,7 @@ async fn execute_resource_search(
             &page.release,
             &evaluation,
             caller.organization_id,
-            Some(authoritative.clone()),
+            projection.entities.clone(),
         )? {
             result_ids.push(format!(
                 "{}::{}",
@@ -294,6 +336,13 @@ async fn execute_action_search(
     request
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let resource = request
+        .resource()
+        .ok_or_else(|| ApiError::bad_request("resource is required"))?;
+    let resource_type = resource
+        .resource_type()
+        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
+    iam::validate_business_resource_type(resource_type)?;
     let Some(page) = resolve_page(
         state,
         caller,
@@ -308,7 +357,7 @@ async fn execute_action_search(
     let subject = request
         .subject()
         .ok_or_else(|| ApiError::bad_request("subject is required"))?;
-    let Some(authoritative) = authoritative_subject(state, caller, subject).await? else {
+    let Some(identity) = authoritative_identity(state, caller, subject).await? else {
         return Ok(SearchExecution {
             response: SearchResponse::new(Vec::new())
                 .with_page(PageResponse::new("").with_count(0)),
@@ -317,15 +366,9 @@ async fn execute_action_search(
             result_ids: Vec::new(),
         });
     };
-    let resource = request
-        .resource()
-        .ok_or_else(|| ApiError::bad_request("resource is required"))?;
     let subject_type = subject
         .subject_type()
         .ok_or_else(|| ApiError::bad_request("subject.type is required"))?;
-    let resource_type = resource
-        .resource_type()
-        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
     let actions =
         policy::applicable_actions(&page.release.schema_source, subject_type, resource_type)?
             .into_iter()
@@ -333,6 +376,13 @@ async fn execute_action_search(
             .take(SCAN_LIMIT + 1)
             .collect::<Vec<_>>();
     let context = request.context().cloned().unwrap_or_default();
+    let projection = iam::project_identity(
+        &identity,
+        caller.organization_id,
+        caller.application_id,
+        subject.properties(),
+        page.iam_ready,
+    );
     let mut results = Vec::new();
     let mut result_ids = Vec::new();
     let mut evaluated = 0;
@@ -348,7 +398,7 @@ async fn execute_action_search(
             &page.release,
             &evaluation,
             caller.organization_id,
-            Some(authoritative.clone()),
+            projection.entities.clone(),
         )? {
             result_ids.push(name.clone());
             results.push(action);
@@ -405,8 +455,10 @@ async fn resolve_page(
             .policy_release(caller.application_id, release_id)
             .await?
             .ok_or_else(|| ApiError::bad_request("search page token release was not found"))?;
+        let iam_ready = iam::schema_is_iam_ready(&release.schema_source);
         return Ok(Some(PageState {
             release,
+            iam_ready,
             query_hash,
             cursor: claims.last_key,
             limit: limit as usize,
@@ -416,11 +468,15 @@ async fn resolve_page(
         .db
         .active_policy_release(caller.application_id)
         .await?
-        .map(|release| PageState {
-            release,
-            query_hash,
-            cursor: String::new(),
-            limit: limit as usize,
+        .map(|release| {
+            let iam_ready = iam::schema_is_iam_ready(&release.schema_source);
+            PageState {
+                release,
+                iam_ready,
+                query_hash,
+                cursor: String::new(),
+                limit: limit as usize,
+            }
         }))
 }
 
@@ -487,11 +543,11 @@ fn stored_resource(candidate: &StoredResource) -> Resource {
     resource
 }
 
-async fn authoritative_subject(
+async fn authoritative_identity(
     state: &AppState,
     caller: &AuthzenCaller,
     subject: &Subject,
-) -> Result<Option<Value>> {
+) -> Result<Option<AuthorizationIdentity>> {
     if subject.subject_type() != Some("User") {
         return Ok(None);
     }
@@ -500,16 +556,15 @@ async fn authoritative_subject(
     };
     Ok(state
         .db
-        .active_subject_attributes(user_id, caller.organization_id)
-        .await?
-        .map(|subject| json!({ "email": subject.email, "role": subject.role })))
+        .authorization_identity(caller.application_id, caller.organization_id, user_id)
+        .await?)
 }
 
 fn is_allowed(
     release: &PolicyRelease,
     request: &EvaluationRequest,
     organization_id: Uuid,
-    authoritative_subject: Option<Value>,
+    authoritative_entities: Vec<Value>,
 ) -> Result<bool> {
     Ok(policy::evaluate(
         &release.schema_source,
@@ -517,7 +572,7 @@ fn is_allowed(
         &release.entities,
         request,
         organization_id,
-        authoritative_subject.map(policy::SubjectAuthority::Attributes),
+        Some(authoritative_entities),
     )?["decision"]
         .as_bool()
         .unwrap_or(false))

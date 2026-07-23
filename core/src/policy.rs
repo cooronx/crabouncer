@@ -22,11 +22,6 @@ struct PolicyDraft {
     enabled: bool,
 }
 
-pub(crate) enum SubjectAuthority {
-    Attributes(Value),
-    EntityGraph(Vec<Value>),
-}
-
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct IamPolicyReferences {
     pub(crate) group_keys: Vec<String>,
@@ -171,7 +166,7 @@ pub(crate) fn evaluate(
     persistent_entities: &Value,
     input: &EvaluationRequest,
     organization_id: Uuid,
-    authoritative_subject: Option<SubjectAuthority>,
+    authoritative_entities: Option<Vec<Value>>,
 ) -> Result<Value> {
     input
         .validate()
@@ -215,21 +210,16 @@ pub(crate) fn evaluate(
     let action = uid("Action", action_name)?;
     let resource_uid = uid(resource_type, resource_id)?;
     let mut all_entities = iam::filter_reserved_entities(persistent_entities)?;
-    match authoritative_subject {
-        Some(SubjectAuthority::EntityGraph(entities)) => {
+    match authoritative_entities {
+        Some(entities) => {
             all_entities.extend(entities);
         }
-        authority => {
+        None => {
             let mut subject_attrs = subject.properties().clone();
             subject_attrs.insert(
                 "organization_id".into(),
                 Value::String(expected_org.clone()),
             );
-            if let Some(SubjectAuthority::Attributes(Value::Object(authoritative))) = authority {
-                for (key, value) in authoritative {
-                    subject_attrs.insert(key, value);
-                }
-            }
             replace_entity(
                 &mut all_entities,
                 &principal,
@@ -871,7 +861,7 @@ mod tests {
             &json!([]),
             &request,
             organization_id,
-            Some(SubjectAuthority::EntityGraph(full.entities)),
+            Some(full.entities),
         )
         .unwrap();
         assert_eq!(result["decision"], true);
@@ -889,7 +879,7 @@ mod tests {
             &json!([]),
             &request,
             organization_id,
-            Some(SubjectAuthority::EntityGraph(legacy.entities)),
+            Some(legacy.entities),
         )
         .unwrap();
         assert_eq!(result["decision"], false);

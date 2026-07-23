@@ -13,16 +13,8 @@ pub(crate) struct AuthzenCaller {
 }
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct SubjectAttributes {
-    pub(crate) email: String,
-    pub(crate) role: String,
-}
-
-#[derive(sqlx::FromRow)]
 pub(crate) struct SearchSubject {
     pub(crate) id: Uuid,
-    pub(crate) email: String,
-    pub(crate) role: String,
 }
 
 #[derive(Clone)]
@@ -101,18 +93,6 @@ impl Database {
             .await?)
     }
 
-    pub(crate) async fn active_subject_attributes(
-        &self,
-        user_id: Uuid,
-        organization_id: Uuid,
-    ) -> Result<Option<SubjectAttributes>> {
-        Ok(sqlx::query_as("SELECT email, role::text AS role FROM users WHERE id = $1 AND organization_id = $2 AND status = 'active'")
-            .bind(user_id)
-            .bind(organization_id)
-            .fetch_optional(&self.pool)
-            .await?)
-    }
-
     pub(crate) async fn active_subjects_after(
         &self,
         organization_id: Uuid,
@@ -120,7 +100,7 @@ impl Database {
         limit: i64,
     ) -> Result<Vec<SearchSubject>> {
         Ok(sqlx::query_as(
-            "SELECT id, email, role::text AS role
+            "SELECT id
              FROM users
              WHERE organization_id = $1
                AND status = 'active'

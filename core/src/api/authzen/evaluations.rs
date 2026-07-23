@@ -156,7 +156,7 @@ async fn run_evaluation(
                     &release.entities,
                     &request,
                     caller.organization_id,
-                    Some(policy::SubjectAuthority::EntityGraph(projection.entities)),
+                    Some(projection.entities),
                 )?
             }
             None => {
