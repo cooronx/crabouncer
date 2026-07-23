@@ -291,6 +291,7 @@ pub(crate) fn validate_synced_resource(
     properties: &Map<String, Value>,
     organization_id: Uuid,
 ) -> Result<Value> {
+    iam::validate_business_resource_type(resource_type)?;
     if properties.contains_key("organization_id") {
         return Err(ApiError::bad_request(
             "organization_id is reserved and supplied by Crabouncer",
@@ -316,6 +317,7 @@ pub(crate) fn validate_stored_resource(
     resource_id: &str,
     properties: &Value,
 ) -> Result<()> {
+    iam::validate_business_resource_type(resource_type)?;
     let schema = parse_schema(schema_source)?;
     uid(resource_type, resource_id)?;
     let entity = json!([{
@@ -651,6 +653,44 @@ mod tests {
             validate_synced_resource(&schema, "Document", "one", &properties, organization_id)
                 .unwrap();
         assert_eq!(result["organization_id"], organization_id.to_string());
+    }
+
+    #[test]
+    fn rejects_managed_types_as_synced_or_stored_resources() {
+        let schema = json!({
+            "": {
+                "entityTypes": {
+                    "Role": {
+                        "shape": {
+                            "type": "Record",
+                            "attributes": {
+                                "organization_id": { "type": "String", "required": true },
+                                "application_id": { "type": "String", "required": true }
+                            }
+                        }
+                    }
+                },
+                "actions": {}
+            }
+        })
+        .to_string();
+        assert!(
+            validate_synced_resource(&schema, "Role", "reader", &Map::new(), Uuid::now_v7())
+                .is_err()
+        );
+        assert!(
+            validate_stored_resource(
+                &schema,
+                "Role",
+                "reader",
+                &json!({
+                    "organization_id": Uuid::now_v7().to_string(),
+                    "application_id": Uuid::now_v7().to_string(),
+                }),
+            )
+            .is_err()
+        );
+        assert!(validate_resource_identity("Role", "reader").is_ok());
     }
 
     #[test]
