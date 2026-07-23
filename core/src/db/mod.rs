@@ -2,6 +2,7 @@ mod applications;
 mod audit;
 mod authzen;
 mod bootstrap;
+mod groups;
 mod oidc;
 mod policies;
 mod resources;
@@ -19,6 +20,7 @@ pub(crate) use applications::{
 pub(crate) use audit::{AuditEvent, ServiceAuditEvent};
 pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SearchLog, SubjectAttributes};
 pub(crate) use bootstrap::BootstrapAdmin;
+pub(crate) use groups::{Group, GroupMember, NewGroup, UpdateGroup};
 pub(crate) use oidc::{
     AuthorizationApp, AuthorizationCode, AuthorizationCodeExchange, RefreshRotation,
     ServiceCredential, UserGrant, UserProfile,

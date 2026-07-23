@@ -8,6 +8,30 @@ pub(super) fn name(value: &str, field: &str) -> Result<()> {
     }
 }
 
+pub(super) fn immutable_key(value: &str) -> Result<String> {
+    let key = value.trim().to_lowercase();
+    let bytes = key.as_bytes();
+    let valid = match bytes {
+        [only] => only.is_ascii_lowercase(),
+        [first, middle @ .., last] => {
+            key.len() <= 64
+                && first.is_ascii_lowercase()
+                && middle
+                    .iter()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'_')
+                && (last.is_ascii_lowercase() || last.is_ascii_digit())
+        }
+        [] => false,
+    };
+    if valid {
+        Ok(key)
+    } else {
+        Err(ApiError::bad_request(
+            "key must start with a lowercase letter, contain only lowercase letters, digits, or underscores, end with a letter or digit, and be at most 64 characters",
+        ))
+    }
+}
+
 pub(super) fn email(value: &str) -> Result<()> {
     let value = value.trim();
     if value.contains('@') && !value.contains(char::is_whitespace) {
@@ -62,5 +86,47 @@ pub(super) fn service_scopes(values: &[String]) -> Result<()> {
         Ok(())
     } else {
         Err(ApiError::bad_request("unsupported service account scope"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn immutable_keys_are_trimmed_and_lowercased() {
+        assert_eq!(super::immutable_key(" A ").unwrap(), "a");
+        assert_eq!(
+            super::immutable_key(" Quant_Research1 ").unwrap(),
+            "quant_research1"
+        );
+    }
+
+    #[test]
+    fn immutable_keys_accept_the_supported_shape() {
+        for key in [
+            "a",
+            "ab",
+            "a0",
+            "a_b",
+            "a__b",
+            &format!("a{}z", "_".repeat(62)),
+        ] {
+            assert!(super::immutable_key(key).is_ok(), "{key}");
+        }
+    }
+
+    #[test]
+    fn immutable_keys_reject_unsupported_shapes() {
+        for key in [
+            "",
+            "_a",
+            "1a",
+            "a_",
+            "a-b",
+            "a b",
+            "á",
+            &format!("a{}z", "_".repeat(63)),
+        ] {
+            assert!(super::immutable_key(key).is_err(), "{key}");
+        }
     }
 }

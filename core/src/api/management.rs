@@ -1,5 +1,6 @@
 mod access;
 mod applications;
+mod groups;
 mod logs;
 mod organizations;
 mod policies;
@@ -10,7 +11,7 @@ use std::sync::Arc;
 
 use axum::{
     Router, middleware,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 
 use crate::AppState;
@@ -34,6 +35,23 @@ pub(super) fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
             get(organizations::list_users).post(organizations::create_user),
         )
         .route("/api/v1/users/{id}", patch(organizations::update_user))
+        .route(
+            "/api/v1/organizations/{id}/groups",
+            get(groups::list_groups).post(groups::create_group),
+        )
+        .route(
+            "/api/v1/groups/{id}",
+            get(groups::get_group).patch(groups::update_group),
+        )
+        .route(
+            "/api/v1/groups/{id}/members",
+            get(groups::list_group_members),
+        )
+        .route(
+            "/api/v1/groups/{id}/members/{user_id}",
+            put(groups::add_group_member).delete(groups::remove_group_member),
+        )
+        .route("/api/v1/users/{id}/groups", get(groups::list_user_groups))
         .route(
             "/api/v1/organizations/{id}/applications",
             get(applications::list_applications).post(applications::create_application),
