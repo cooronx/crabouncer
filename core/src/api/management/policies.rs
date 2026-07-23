@@ -85,6 +85,9 @@ pub(super) async fn validate_workspace(
         &snapshot.policies,
         &snapshot.entities,
     )?;
+    if let Some(active) = state.db.active_policy_release(id).await? {
+        policy::validate_schema_evolution(&active.schema_source, &snapshot.schema_source)?;
+    }
     Ok(Json(json!({ "valid": true })))
 }
 
@@ -127,6 +130,9 @@ pub(super) async fn publish_release(
         &snapshot.policies,
         &snapshot.entities,
     )?;
+    if let Some(active) = state.db.active_policy_release(id).await? {
+        policy::validate_schema_evolution(&active.schema_source, &snapshot.schema_source)?;
+    }
     let release_id = Uuid::now_v7();
     let release: PolicyReleaseResult = state
         .db
@@ -161,6 +167,19 @@ pub(super) async fn activate_release(
     Path((id, release_id)): Path<(Uuid, Uuid)>,
 ) -> Result<StatusCode> {
     let application = manage_application(&state, &current, id).await?;
+    let release = state
+        .db
+        .policy_release(id, release_id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("Release"))?;
+    for resource in state.db.all_resources(id).await? {
+        policy::validate_stored_resource(
+            &release.schema_source,
+            &resource.resource_type,
+            &resource.resource_id,
+            &resource.properties,
+        )?;
+    }
     if !state
         .db
         .activate_policy_release(id, release_id, current.id)

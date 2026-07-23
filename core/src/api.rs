@@ -1,6 +1,7 @@
 mod authzen;
 mod management;
 mod oidc;
+mod resource_sync;
 
 use std::sync::Arc;
 
@@ -14,5 +15,6 @@ pub(crate) fn routes(state: Arc<AppState>) -> Router {
         .merge(management::routes(state.clone()))
         .merge(oidc::routes())
         .merge(authzen::routes())
+        .merge(resource_sync::routes())
         .with_state(state)
 }

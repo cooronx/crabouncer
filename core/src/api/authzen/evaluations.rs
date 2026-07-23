@@ -11,11 +11,7 @@ use authzen_rs::{
     Decision, EvaluationRequest, EvaluationsRequest, EvaluationsResponse,
     server::PolicyDecisionPoint,
 };
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, header},
-};
+use axum::{Json, extract::State, http::HeaderMap};
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
@@ -79,45 +75,6 @@ impl PolicyDecisionPoint for CrabouncerPdp {
     }
 }
 
-async fn caller(state: &AppState, headers: &HeaderMap) -> Result<AuthzenCaller> {
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .ok_or_else(ApiError::unauthorized)?;
-    let claims = state
-        .keys
-        .verify(token, &state.config.tokens.issuer, "authzen")?;
-    if claims.kind != "service"
-        || claims.token_use != "access"
-        || !claims
-            .scope
-            .split_whitespace()
-            .any(|v| v == "authzen:evaluate")
-    {
-        return Err(ApiError::forbidden());
-    }
-    let account_id = claims
-        .service_account_id
-        .as_deref()
-        .and_then(|v| Uuid::parse_str(v).ok())
-        .ok_or_else(ApiError::unauthorized)?;
-    let application_id = claims
-        .application_id
-        .as_deref()
-        .and_then(|v| Uuid::parse_str(v).ok())
-        .ok_or_else(ApiError::unauthorized)?;
-    let row = state
-        .db
-        .authzen_caller(account_id, application_id)
-        .await?
-        .ok_or_else(ApiError::unauthorized)?;
-    if claims.organization_id != row.organization_id.to_string() {
-        return Err(ApiError::unauthorized());
-    }
-    Ok(row)
-}
-
 pub(super) async fn evaluate_one(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -126,8 +83,8 @@ pub(super) async fn evaluate_one(
     request
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let caller = caller(&state, &headers).await?;
-    let request_id = request_id(&headers);
+    let caller = super::service_caller(&state, &headers, "authzen:evaluate").await?;
+    let request_id = super::request_id(&headers);
     let pdp = CrabouncerPdp::single(state, caller, request_id);
     Ok(Json(pdp.evaluate(request).await?))
 }
@@ -140,8 +97,8 @@ pub(super) async fn evaluate_many(
     batch
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
-    let caller = caller(&state, &headers).await?;
-    let base_request_id = request_id(&headers);
+    let caller = super::service_caller(&state, &headers, "authzen:evaluate").await?;
+    let base_request_id = super::request_id(&headers);
     if batch.evaluations().len() > 100 {
         return Err(ApiError::bad_request("at most 100 evaluations are allowed"));
     }
@@ -221,15 +178,6 @@ async fn run_evaluation(
     context.insert("request_id".into(), Value::String(request_id.into()));
     context.insert("reason".into(), Value::String(reason));
     Ok(Decision::new(allowed).with_context(context))
-}
-
-fn request_id(headers: &HeaderMap) -> String {
-    headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| Uuid::now_v7().to_string())
 }
 
 fn redact(value: &mut Value, fields: &[String]) {

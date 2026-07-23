@@ -54,13 +54,13 @@ pub(super) fn oidc_scopes(values: &[String]) -> Result<()> {
 }
 
 pub(super) fn service_scopes(values: &[String]) -> Result<()> {
-    if values.iter().all(|value| value == "authzen:evaluate")
-        && values.iter().any(|value| value == "authzen:evaluate")
+    if !values.is_empty()
+        && values
+            .iter()
+            .all(|value| matches!(value.as_str(), "authzen:evaluate" | "resources:sync"))
     {
         Ok(())
     } else {
-        Err(ApiError::bad_request(
-            "service account requires authzen:evaluate scope",
-        ))
+        Err(ApiError::bad_request("unsupported service account scope"))
     }
 }

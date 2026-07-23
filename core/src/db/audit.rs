@@ -13,6 +13,15 @@ pub(crate) struct AuditEvent {
     pub(crate) details: Value,
 }
 
+pub(crate) struct ServiceAuditEvent {
+    pub(crate) organization_id: Uuid,
+    pub(crate) actor_service_account_id: Uuid,
+    pub(crate) action: String,
+    pub(crate) target_type: String,
+    pub(crate) target_id: Option<String>,
+    pub(crate) details: Value,
+}
+
 pub(super) async fn insert(tx: &mut Transaction<'_, Postgres>, event: AuditEvent) -> Result<()> {
     sqlx::query("INSERT INTO audit_logs (id, organization_id, actor_user_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5, $6, $7)")
         .bind(Uuid::now_v7())
@@ -42,6 +51,20 @@ impl Database {
         Ok(())
     }
 
+    pub(crate) async fn record_service_audit(&self, event: ServiceAuditEvent) -> Result<()> {
+        sqlx::query("INSERT INTO audit_logs (id, organization_id, actor_service_account_id, action, target_type, target_id, details) VALUES ($1, $2, $3, $4, $5, $6, $7)")
+            .bind(Uuid::now_v7())
+            .bind(event.organization_id)
+            .bind(event.actor_service_account_id)
+            .bind(event.action)
+            .bind(event.target_type)
+            .bind(event.target_id)
+            .bind(event.details)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn decision_logs(
         &self,
         organization_id: Uuid,
@@ -55,7 +78,7 @@ impl Database {
     }
 
     pub(crate) async fn audit_logs(&self, organization_id: Uuid, limit: i64) -> Result<Vec<Value>> {
-        Ok(sqlx::query_scalar("SELECT to_jsonb(a) FROM (SELECT id, actor_user_id, action, target_type, target_id, details, created_at FROM audit_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2) a")
+        Ok(sqlx::query_scalar("SELECT to_jsonb(a) FROM (SELECT id, actor_user_id, actor_service_account_id, action, target_type, target_id, details, created_at FROM audit_logs WHERE organization_id = $1 ORDER BY created_at DESC LIMIT $2) a")
             .bind(organization_id)
             .bind(limit)
             .fetch_all(&self.pool)

@@ -4,6 +4,7 @@ mod authzen;
 mod bootstrap;
 mod oidc;
 mod policies;
+mod resources;
 mod sessions;
 mod tenants;
 
@@ -15,7 +16,7 @@ pub(crate) use applications::{
     Application, NewApplication, NewServiceAccount, NewServiceSecret, ServiceAccount,
     UpdateApplication,
 };
-pub(crate) use audit::AuditEvent;
+pub(crate) use audit::{AuditEvent, ServiceAuditEvent};
 pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttributes};
 pub(crate) use bootstrap::BootstrapAdmin;
 pub(crate) use oidc::{
@@ -25,6 +26,7 @@ pub(crate) use oidc::{
 pub(crate) use policies::{
     NewPolicyRelease, PolicyReleaseResult, PolicySnapshot, Release, UpdateWorkspace, Workspace,
 };
+pub(crate) use resources::ResourceWriteStatus;
 pub(crate) use sessions::{Actor, LoginUser, NewSession};
 pub(crate) use tenants::{
     ActivationToken, NewOrganization, NewUser, Organization, UpdateOrganization, UpdateUser, User,

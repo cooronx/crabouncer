@@ -16,7 +16,7 @@ pub(crate) struct SubjectAttributes {
     pub(crate) role: String,
 }
 
-#[derive(sqlx::FromRow)]
+#[derive(Clone, sqlx::FromRow)]
 pub(crate) struct PolicyRelease {
     pub(crate) schema_source: String,
     pub(crate) policies: Value,
@@ -69,6 +69,22 @@ impl Database {
             .bind(application_id)
             .fetch_optional(&self.pool)
             .await?)
+    }
+
+    pub(crate) async fn policy_release(
+        &self,
+        application_id: Uuid,
+        release_id: Uuid,
+    ) -> Result<Option<PolicyRelease>> {
+        Ok(sqlx::query_as(
+            "SELECT schema_source, policies, entities
+             FROM policy_releases
+             WHERE application_id = $1 AND id = $2",
+        )
+        .bind(application_id)
+        .bind(release_id)
+        .fetch_optional(&self.pool)
+        .await?)
     }
 
     pub(crate) async fn record_decision(&self, log: DecisionLog) -> Result<()> {
