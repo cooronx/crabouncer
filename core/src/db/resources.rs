@@ -87,4 +87,28 @@ impl Database {
         .fetch_all(&self.pool)
         .await?)
     }
+
+    pub(crate) async fn resources_after(
+        &self,
+        application_id: Uuid,
+        resource_type: &str,
+        after_id: &str,
+        limit: i64,
+    ) -> Result<Vec<StoredResource>> {
+        Ok(sqlx::query_as(
+            "SELECT resource_type, resource_id, properties
+             FROM application_resources
+             WHERE application_id = $1
+               AND resource_type = $2
+               AND resource_id > $3
+             ORDER BY resource_id
+             LIMIT $4",
+        )
+        .bind(application_id)
+        .bind(resource_type)
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
 }

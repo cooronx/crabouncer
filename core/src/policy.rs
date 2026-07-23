@@ -2,8 +2,8 @@ use std::str::FromStr;
 
 use authzen_rs::EvaluationRequest;
 use cedar_policy::{
-    Authorizer, Context, Decision as CedarDecision, Entities, EntityUid, PolicySet, Request,
-    Schema, ValidationMode, Validator,
+    Authorizer, Context, Decision as CedarDecision, Entities, EntityTypeName, EntityUid, PolicySet,
+    Request, Schema, ValidationMode, Validator,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -285,6 +285,24 @@ pub(crate) fn validate_stored_resource(
 
 pub(crate) fn validate_resource_identity(resource_type: &str, resource_id: &str) -> Result<()> {
     uid(resource_type, resource_id).map(|_| ())
+}
+
+pub(crate) fn applicable_actions(
+    schema_source: &str,
+    subject_type: &str,
+    resource_type: &str,
+) -> Result<Vec<String>> {
+    let schema = parse_schema(schema_source)?;
+    let subject_type = EntityTypeName::from_str(subject_type)
+        .map_err(|_| ApiError::bad_request("subject.type is invalid"))?;
+    let resource_type = EntityTypeName::from_str(resource_type)
+        .map_err(|_| ApiError::bad_request("resource.type is invalid"))?;
+    let mut actions = schema
+        .actions_for_principal_and_resource(&subject_type, &resource_type)
+        .map(|action| action.id().unescaped().to_owned())
+        .collect::<Vec<_>>();
+    actions.sort();
+    Ok(actions)
 }
 
 fn compare_named_definitions(

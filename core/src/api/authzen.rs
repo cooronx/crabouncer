@@ -1,5 +1,6 @@
 mod evaluations;
 mod metadata;
+mod search;
 
 use std::sync::Arc;
 
@@ -24,6 +25,9 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         )
         .route("/access/v1/evaluation", post(evaluations::evaluate_one))
         .route("/access/v1/evaluations", post(evaluations::evaluate_many))
+        .route("/access/v1/search/subject", post(search::search_subjects))
+        .route("/access/v1/search/resource", post(search::search_resources))
+        .route("/access/v1/search/action", post(search::search_actions))
 }
 
 pub(crate) async fn service_caller(
@@ -76,4 +80,25 @@ pub(crate) fn request_id(headers: &HeaderMap) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
         .unwrap_or_else(|| Uuid::now_v7().to_string())
+}
+
+pub(super) fn redact(value: &mut serde_json::Value, fields: &[String]) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let names = map.keys().cloned().collect::<Vec<_>>();
+            for name in names {
+                if fields.iter().any(|field| field.eq_ignore_ascii_case(&name)) {
+                    map.insert(name, serde_json::Value::String("[REDACTED]".into()));
+                } else if let Some(value) = map.get_mut(&name) {
+                    redact(value, fields);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact(value, fields);
+            }
+        }
+        _ => {}
+    }
 }

@@ -44,6 +44,20 @@ pub(crate) struct Claims {
     pub(crate) nonce: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct SearchPageClaims {
+    pub(crate) iss: String,
+    pub(crate) aud: String,
+    pub(crate) exp: usize,
+    pub(crate) iat: usize,
+    pub(crate) version: u8,
+    pub(crate) search_kind: String,
+    pub(crate) application_id: String,
+    pub(crate) query_hash: String,
+    pub(crate) release_id: String,
+    pub(crate) last_key: String,
+}
+
 impl SigningKeys {
     pub(crate) fn load(config: &Tokens) -> std::result::Result<Self, String> {
         let private = read(&config.private_key_path)?;
@@ -85,6 +99,27 @@ impl SigningKeys {
         decode::<Claims>(token, &self.decoding, &validation)
             .map(|data| data.claims)
             .map_err(|_| ApiError::unauthorized())
+    }
+
+    pub(crate) fn issue_search_page(&self, kid: &str, claims: &SearchPageClaims) -> Result<String> {
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(kid.into());
+        encode(&header, claims, &self.encoding).map_err(|_| {
+            ApiError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "token_error",
+                "Could not issue search page token",
+            )
+        })
+    }
+
+    pub(crate) fn verify_search_page(&self, token: &str, issuer: &str) -> Result<SearchPageClaims> {
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&[issuer]);
+        validation.set_audience(&["authzen-search"]);
+        decode::<SearchPageClaims>(token, &self.decoding, &validation)
+            .map(|data| data.claims)
+            .map_err(|_| ApiError::bad_request("search page token is invalid or expired"))
     }
 }
 

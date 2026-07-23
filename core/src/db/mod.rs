@@ -17,7 +17,7 @@ pub(crate) use applications::{
     UpdateApplication,
 };
 pub(crate) use audit::{AuditEvent, ServiceAuditEvent};
-pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttributes};
+pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SearchLog, SubjectAttributes};
 pub(crate) use bootstrap::BootstrapAdmin;
 pub(crate) use oidc::{
     AuthorizationApp, AuthorizationCode, AuthorizationCodeExchange, RefreshRotation,
@@ -26,7 +26,7 @@ pub(crate) use oidc::{
 pub(crate) use policies::{
     NewPolicyRelease, PolicyReleaseResult, PolicySnapshot, Release, UpdateWorkspace, Workspace,
 };
-pub(crate) use resources::ResourceWriteStatus;
+pub(crate) use resources::{ResourceWriteStatus, StoredResource};
 pub(crate) use sessions::{Actor, LoginUser, NewSession};
 pub(crate) use tenants::{
     ActivationToken, NewOrganization, NewUser, Organization, UpdateOrganization, UpdateUser, User,

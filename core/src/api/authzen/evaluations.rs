@@ -158,7 +158,7 @@ async fn run_evaluation(
         .unwrap_or("no_permit")
         .to_owned();
     let mut logged = serde_json::to_value(&request).unwrap_or(Value::Null);
-    redact(&mut logged, &state.config.audit.redacted_fields);
+    super::redact(&mut logged, &state.config.audit.redacted_fields);
     state
         .db
         .record_decision(DecisionLog {
@@ -178,25 +178,4 @@ async fn run_evaluation(
     context.insert("request_id".into(), Value::String(request_id.into()));
     context.insert("reason".into(), Value::String(reason));
     Ok(Decision::new(allowed).with_context(context))
-}
-
-fn redact(value: &mut Value, fields: &[String]) {
-    match value {
-        Value::Object(map) => {
-            let names = map.keys().cloned().collect::<Vec<_>>();
-            for name in names {
-                if fields.iter().any(|field| field.eq_ignore_ascii_case(&name)) {
-                    map.insert(name, Value::String("[REDACTED]".into()));
-                } else if let Some(value) = map.get_mut(&name) {
-                    redact(value, fields);
-                }
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                redact(value, fields);
-            }
-        }
-        _ => {}
-    }
 }
