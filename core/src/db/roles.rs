@@ -285,6 +285,21 @@ impl Database {
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         lock_application(&mut tx, role.application_id).await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM application_role_user_assignments
+                WHERE role_id = $1 AND user_id = $2
+            )",
+        )
+        .bind(role.id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if exists {
+            tx.commit().await?;
+            return Ok(false);
+        }
         ensure_active_release(&mut tx, role.application_id, expected_release_id).await?;
         let result = sqlx::query(
             "INSERT INTO application_role_user_assignments (role_id, user_id, organization_id)
@@ -346,6 +361,21 @@ impl Database {
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
         lock_application(&mut tx, role.application_id).await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1
+                FROM application_role_group_assignments
+                WHERE role_id = $1 AND group_id = $2
+            )",
+        )
+        .bind(role.id)
+        .bind(group.id)
+        .fetch_one(&mut *tx)
+        .await?;
+        if exists {
+            tx.commit().await?;
+            return Ok(false);
+        }
         ensure_active_release(&mut tx, role.application_id, expected_release_id).await?;
         let result = sqlx::query(
             "INSERT INTO application_role_group_assignments (role_id, group_id, organization_id)
@@ -432,6 +462,7 @@ impl Database {
         removal: AssignmentRemoval,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        lock_application(&mut tx, role.application_id).await?;
         let result = sqlx::query(removal.statement)
             .bind(role.id)
             .bind(removal.target_id)
