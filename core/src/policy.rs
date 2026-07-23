@@ -9,7 +9,10 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use uuid::Uuid;
 
-use crate::error::{ApiError, Result};
+use crate::{
+    error::{ApiError, Result},
+    iam,
+};
 
 #[derive(Deserialize)]
 struct PolicyDraft {
@@ -28,6 +31,7 @@ pub(crate) fn validate_workspace(
     policies: &Value,
     entities: &Value,
 ) -> Result<()> {
+    iam::reject_reserved_entities(entities)?;
     let schema = parse_schema(schema_source)?;
     let set = parse_policies(policies)?;
     let validation = Validator::new(schema.clone()).validate(&set, ValidationMode::Strict);
@@ -161,10 +165,7 @@ pub(crate) fn evaluate(
     let principal = uid(subject_type, subject_id)?;
     let action = uid("Action", action_name)?;
     let resource_uid = uid(resource_type, resource_id)?;
-    let mut all_entities = persistent_entities
-        .as_array()
-        .cloned()
-        .ok_or_else(|| ApiError::validation("entities must be an array", Value::Null))?;
+    let mut all_entities = iam::filter_reserved_entities(persistent_entities)?;
     let mut subject_attrs = subject.properties().clone();
     subject_attrs.insert(
         "organization_id".into(),

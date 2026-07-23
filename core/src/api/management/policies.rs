@@ -16,7 +16,7 @@ use crate::{
         UpdateWorkspace as DatabaseUpdateWorkspace, Workspace,
     },
     error::{ApiError, Result},
-    policy,
+    iam, policy,
 };
 
 use super::{
@@ -52,6 +52,7 @@ pub(super) async fn update_workspace(
             "policies and entities must be arrays",
         ));
     }
+    iam::reject_reserved_entities(&body.entities)?;
     state
         .db
         .update_workspace(DatabaseUpdateWorkspace {
@@ -172,6 +173,7 @@ pub(super) async fn activate_release(
         .policy_release(id, release_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Release"))?;
+    policy::validate_workspace(&release.schema_source, &release.policies, &release.entities)?;
     for resource in state.db.all_resources(id).await? {
         policy::validate_stored_resource(
             &release.schema_source,

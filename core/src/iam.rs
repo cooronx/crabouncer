@@ -1,11 +1,43 @@
 use std::collections::BTreeSet;
 
-use cedar_policy::{Entities, Schema};
+use cedar_policy::{Entities, EntityUid, Schema};
 use serde_json::{Value, json};
 
 use crate::error::{ApiError, Result};
 
 const RESERVED_TYPES: [&str; 3] = ["User", "Group", "Role"];
+
+pub(crate) fn reject_reserved_entities(entities: &Value) -> Result<()> {
+    let entities = entities
+        .as_array()
+        .ok_or_else(|| ApiError::validation("entities must be an array", Value::Null))?;
+    for (index, entity) in entities.iter().enumerate() {
+        let uid = parse_entity_uid(entity, index)?;
+        if let Some(entity_type) = reserved_root_type(&uid) {
+            return Err(ApiError::validation(
+                "Workspace entities cannot define Crabouncer-managed entity types",
+                json!([format!(
+                    "entities[{index}] defines reserved entity type {entity_type}"
+                )]),
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn filter_reserved_entities(entities: &Value) -> Result<Vec<Value>> {
+    let entities = entities
+        .as_array()
+        .ok_or_else(|| ApiError::validation("entities must be an array", Value::Null))?;
+    let mut filtered = Vec::with_capacity(entities.len());
+    for (index, entity) in entities.iter().enumerate() {
+        let uid = parse_entity_uid(entity, index)?;
+        if reserved_root_type(&uid).is_none() {
+            filtered.push(entity.clone());
+        }
+    }
+    Ok(filtered)
+}
 
 pub(crate) fn validate_schema_contract(schema_source: &str) -> Result<()> {
     let raw: Value = serde_json::from_str(schema_source).map_err(|error| {
@@ -63,6 +95,32 @@ pub(crate) fn validate_schema_contract(schema_source: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_entity_uid(entity: &Value, index: usize) -> Result<EntityUid> {
+    let raw_uid = entity.get("uid").ok_or_else(|| {
+        ApiError::validation(
+            "Cedar entity UID is required",
+            json!([format!("entities[{index}].uid is missing")]),
+        )
+    })?;
+    EntityUid::from_json(raw_uid.clone()).map_err(|error| {
+        ApiError::validation(
+            "Cedar entity UID could not be parsed",
+            json!([format!("entities[{index}].uid: {error}")]),
+        )
+    })
+}
+
+fn reserved_root_type(uid: &EntityUid) -> Option<&'static str> {
+    let entity_type = uid.type_name();
+    if entity_type.namespace_components().next().is_some() {
+        return None;
+    }
+    RESERVED_TYPES
+        .iter()
+        .copied()
+        .find(|reserved| entity_type.basename() == *reserved)
 }
 
 fn require_membership(
@@ -190,5 +248,63 @@ mod tests {
         optional_attribute[""]["entityTypes"]["Role"]["shape"]["attributes"]["application_id"]["required"] =
             json!(false);
         assert!(validate_schema_contract(&optional_attribute.to_string()).is_err());
+    }
+
+    #[test]
+    fn rejects_implicit_and_explicit_reserved_entities() {
+        for uid in [
+            json!({ "type": "User", "id": "one" }),
+            json!({ "__entity": { "type": "Group", "id": "one" } }),
+            json!({ "type": "Role", "id": "one" }),
+        ] {
+            let entities = json!([{ "uid": uid, "attrs": {}, "parents": [] }]);
+            assert!(reject_reserved_entities(&entities).is_err());
+        }
+    }
+
+    #[test]
+    fn keeps_namespaced_and_business_entities() {
+        let entities = json!([
+            {
+                "uid": { "type": "Application::Role", "id": "one" },
+                "attrs": {},
+                "parents": []
+            },
+            {
+                "uid": { "type": "Document", "id": "one" },
+                "attrs": {},
+                "parents": []
+            }
+        ]);
+        reject_reserved_entities(&entities).unwrap();
+        assert_eq!(
+            filter_reserved_entities(&entities).unwrap(),
+            entities.as_array().unwrap().to_owned()
+        );
+    }
+
+    #[test]
+    fn filters_reserved_entities_and_rejects_malformed_uids() {
+        let entities = json!([
+            {
+                "uid": { "__entity": { "type": "Role", "id": "reader" } },
+                "attrs": {},
+                "parents": []
+            },
+            {
+                "uid": { "type": "Document", "id": "one" },
+                "attrs": {},
+                "parents": []
+            }
+        ]);
+        let filtered = filter_reserved_entities(&entities).unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0]["uid"]["type"], "Document");
+
+        assert!(filter_reserved_entities(&json!([{}])).is_err());
+        assert!(
+            filter_reserved_entities(&json!([{ "uid": { "type": "bad type", "id": "one" } }]))
+                .is_err()
+        );
     }
 }
