@@ -1,4 +1,4 @@
-use std::str::FromStr;
+use std::{collections::BTreeSet, str::FromStr};
 
 use authzen_rs::EvaluationRequest;
 use cedar_policy::{
@@ -22,8 +22,51 @@ struct PolicyDraft {
     enabled: bool,
 }
 
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct IamPolicyReferences {
+    pub(crate) group_keys: Vec<String>,
+    pub(crate) role_keys: Vec<String>,
+}
+
+impl IamPolicyReferences {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.group_keys.is_empty() && self.role_keys.is_empty()
+    }
+}
+
 fn enabled() -> bool {
     true
+}
+
+pub(crate) fn iam_policy_references(policies: &Value) -> Result<IamPolicyReferences> {
+    let set = parse_policies(policies)?;
+    if set.templates().next().is_some() {
+        return Err(ApiError::validation(
+            "Cedar policy templates are not supported",
+            Value::Null,
+        ));
+    }
+
+    let mut group_keys = BTreeSet::new();
+    let mut role_keys = BTreeSet::new();
+    for uid in set
+        .policies()
+        .flat_map(cedar_policy::Policy::entity_literals)
+    {
+        match iam::reserved_root_type(&uid) {
+            Some("Group") => {
+                group_keys.insert(uid.id().unescaped().to_owned());
+            }
+            Some("Role") => {
+                role_keys.insert(uid.id().unescaped().to_owned());
+            }
+            _ => {}
+        }
+    }
+    Ok(IamPolicyReferences {
+        group_keys: group_keys.into_iter().collect(),
+        role_keys: role_keys.into_iter().collect(),
+    })
 }
 
 pub(crate) fn validate_workspace(
@@ -651,5 +694,46 @@ mod tests {
         })
         .to_string();
         assert!(validate_schema_evolution(&current, &next).is_err());
+    }
+
+    #[test]
+    fn extracts_enabled_root_iam_references() {
+        let policies = json!([
+            {
+                "name": "managed references",
+                "enabled": true,
+                "source": r#"permit (
+                    principal in Group::"engineering",
+                    action,
+                    resource
+                ) when {
+                    principal in Role::"reader"
+                    || principal in Role::"reader"
+                    || principal in Application::Role::"custom"
+                };"#
+            },
+            {
+                "name": "disabled",
+                "enabled": false,
+                "source": r#"permit (
+                    principal in Group::"ignored",
+                    action,
+                    resource
+                );"#
+            }
+        ]);
+        let references = iam_policy_references(&policies).unwrap();
+        assert_eq!(references.group_keys, vec!["engineering"]);
+        assert_eq!(references.role_keys, vec!["reader"]);
+    }
+
+    #[test]
+    fn rejects_policy_templates() {
+        let policies = json!([{
+            "name": "unsupported template",
+            "enabled": true,
+            "source": "permit (principal == ?principal, action, resource);"
+        }]);
+        assert!(iam_policy_references(&policies).is_err());
     }
 }

@@ -112,7 +112,7 @@ fn parse_entity_uid(entity: &Value, index: usize) -> Result<EntityUid> {
     })
 }
 
-fn reserved_root_type(uid: &EntityUid) -> Option<&'static str> {
+pub(crate) fn reserved_root_type(uid: &EntityUid) -> Option<&'static str> {
     let entity_type = uid.type_name();
     if entity_type.namespace_components().next().is_some() {
         return None;

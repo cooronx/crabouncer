@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -84,6 +84,58 @@ struct AssignmentRemoval {
 }
 
 impl Database {
+    pub(crate) async fn application_has_role_assignments(
+        &self,
+        application_id: Uuid,
+    ) -> Result<bool> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (
+                SELECT 1
+                FROM application_roles role
+                WHERE role.application_id = $1
+                  AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM application_role_user_assignments assignment
+                        WHERE assignment.role_id = role.id
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM application_role_group_assignments assignment
+                        WHERE assignment.role_id = role.id
+                    )
+                  )
+            )",
+        )
+        .bind(application_id)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    pub(crate) async fn missing_application_role_keys(
+        &self,
+        application_id: Uuid,
+        keys: &[String],
+    ) -> Result<Vec<String>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let existing: BTreeSet<String> = sqlx::query_scalar(
+            "SELECT key FROM application_roles WHERE application_id = $1 AND key = ANY($2::text[])",
+        )
+        .bind(application_id)
+        .bind(keys)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect();
+        Ok(keys
+            .iter()
+            .filter(|key| !existing.contains(*key))
+            .cloned()
+            .collect())
+    }
+
     pub(crate) async fn application_role(&self, id: Uuid) -> Result<Option<ApplicationRole>> {
         Ok(sqlx::query_as(
             "SELECT id, application_id, organization_id, key, display_name, enabled, created_at, updated_at FROM application_roles WHERE id = $1",

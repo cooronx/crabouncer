@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use serde::Serialize;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -44,6 +46,30 @@ pub(crate) struct UpdateGroup {
 }
 
 impl Database {
+    pub(crate) async fn missing_group_keys(
+        &self,
+        organization_id: Uuid,
+        keys: &[String],
+    ) -> Result<Vec<String>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let existing: BTreeSet<String> = sqlx::query_scalar(
+            "SELECT key FROM groups WHERE organization_id = $1 AND key = ANY($2::text[])",
+        )
+        .bind(organization_id)
+        .bind(keys)
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .collect();
+        Ok(keys
+            .iter()
+            .filter(|key| !existing.contains(*key))
+            .cloned()
+            .collect())
+    }
+
     pub(crate) async fn group(&self, id: Uuid) -> Result<Option<Group>> {
         Ok(sqlx::query_as(
             "SELECT id, organization_id, key, display_name, kind::text AS kind, enabled, created_at, updated_at FROM groups WHERE id = $1",

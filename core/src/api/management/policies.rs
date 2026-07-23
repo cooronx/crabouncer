@@ -79,13 +79,17 @@ pub(super) async fn validate_workspace(
     Extension(current): Extension<Actor>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Value>> {
-    view_application(&state, &current, id).await?;
+    let application = view_application(&state, &current, id).await?;
     let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
-    policy::validate_workspace(
+    validate_policy_candidate(
+        &state,
+        id,
+        application.organization_id,
         &snapshot.schema_source,
         &snapshot.policies,
         &snapshot.entities,
-    )?;
+    )
+    .await?;
     if let Some(active) = state.db.active_policy_release(id).await? {
         policy::validate_schema_evolution(&active.schema_source, &snapshot.schema_source)?;
     }
@@ -126,11 +130,15 @@ pub(super) async fn publish_release(
 ) -> Result<(StatusCode, Json<Value>)> {
     let application = manage_application(&state, &current, id).await?;
     let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
-    policy::validate_workspace(
+    validate_policy_candidate(
+        &state,
+        id,
+        application.organization_id,
         &snapshot.schema_source,
         &snapshot.policies,
         &snapshot.entities,
-    )?;
+    )
+    .await?;
     if let Some(active) = state.db.active_policy_release(id).await? {
         policy::validate_schema_evolution(&active.schema_source, &snapshot.schema_source)?;
     }
@@ -173,7 +181,15 @@ pub(super) async fn activate_release(
         .policy_release(id, release_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Release"))?;
-    policy::validate_workspace(&release.schema_source, &release.policies, &release.entities)?;
+    validate_policy_candidate(
+        &state,
+        id,
+        application.organization_id,
+        &release.schema_source,
+        &release.policies,
+        &release.entities,
+    )
+    .await?;
     for resource in state.db.all_resources(id).await? {
         policy::validate_stored_resource(
             &release.schema_source,
@@ -199,4 +215,42 @@ pub(super) async fn activate_release(
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn validate_policy_candidate(
+    state: &AppState,
+    application_id: Uuid,
+    organization_id: Uuid,
+    schema_source: &str,
+    policies: &Value,
+    entities: &Value,
+) -> Result<()> {
+    policy::validate_workspace(schema_source, policies, entities)?;
+    let references = policy::iam_policy_references(policies)?;
+    let missing_groups = state
+        .db
+        .missing_group_keys(organization_id, &references.group_keys)
+        .await?;
+    let missing_roles = state
+        .db
+        .missing_application_role_keys(application_id, &references.role_keys)
+        .await?;
+    if !missing_groups.is_empty() || !missing_roles.is_empty() {
+        return Err(ApiError::validation(
+            "Cedar policies reference unknown managed entities",
+            json!({
+                "groups": missing_groups,
+                "roles": missing_roles,
+            }),
+        ));
+    }
+    if !references.is_empty()
+        || state
+            .db
+            .application_has_role_assignments(application_id)
+            .await?
+    {
+        iam::validate_schema_contract(schema_source)?;
+    }
+    Ok(())
 }
