@@ -22,6 +22,11 @@ struct PolicyDraft {
     enabled: bool,
 }
 
+pub(crate) enum SubjectAuthority {
+    Attributes(Value),
+    EntityGraph(Vec<Value>),
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct IamPolicyReferences {
     pub(crate) group_keys: Vec<String>,
@@ -166,7 +171,7 @@ pub(crate) fn evaluate(
     persistent_entities: &Value,
     input: &EvaluationRequest,
     organization_id: Uuid,
-    authoritative_subject: Option<Value>,
+    authoritative_subject: Option<SubjectAuthority>,
 ) -> Result<Value> {
     input
         .validate()
@@ -192,6 +197,7 @@ pub(crate) fn evaluate(
     let resource_type = resource
         .resource_type()
         .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
+    iam::validate_business_resource_type(resource_type)?;
     let resource_id = resource
         .id()
         .ok_or_else(|| ApiError::bad_request("resource.id is required"))?;
@@ -209,26 +215,35 @@ pub(crate) fn evaluate(
     let action = uid("Action", action_name)?;
     let resource_uid = uid(resource_type, resource_id)?;
     let mut all_entities = iam::filter_reserved_entities(persistent_entities)?;
-    let mut subject_attrs = subject.properties().clone();
-    subject_attrs.insert(
-        "organization_id".into(),
-        Value::String(expected_org.clone()),
-    );
-    if let Some(Value::Object(authoritative)) = authoritative_subject {
-        for (key, value) in authoritative {
-            subject_attrs.insert(key, value);
+    match authoritative_subject {
+        Some(SubjectAuthority::EntityGraph(entities)) => {
+            all_entities.extend(entities);
+        }
+        authority => {
+            let mut subject_attrs = subject.properties().clone();
+            subject_attrs.insert(
+                "organization_id".into(),
+                Value::String(expected_org.clone()),
+            );
+            if let Some(SubjectAuthority::Attributes(Value::Object(authoritative))) = authority {
+                for (key, value) in authoritative {
+                    subject_attrs.insert(key, value);
+                }
+            }
+            replace_entity(
+                &mut all_entities,
+                &principal,
+                subject_type,
+                subject_id,
+                Value::Object(subject_attrs),
+            );
         }
     }
-    replace_entity(
-        &mut all_entities,
-        subject_type,
-        subject_id,
-        Value::Object(subject_attrs),
-    );
     let mut resource_attrs = resource.properties().clone();
     resource_attrs.insert("organization_id".into(), Value::String(expected_org));
     replace_entity(
         &mut all_entities,
+        &resource_uid,
         resource_type,
         resource_id,
         Value::Object(resource_attrs),
@@ -509,11 +524,18 @@ fn uid(kind: &str, id: &str) -> Result<EntityUid> {
         .map_err(|_| ApiError::bad_request("Cedar entity UID is invalid"))
 }
 
-fn replace_entity(entities: &mut Vec<Value>, kind: &str, id: &str, attrs: Value) {
+fn replace_entity(
+    entities: &mut Vec<Value>,
+    target: &EntityUid,
+    kind: &str,
+    id: &str,
+    attrs: Value,
+) {
     entities.retain(|entity| {
-        let uid = entity.get("uid");
-        uid.and_then(|v| v.get("type")).and_then(Value::as_str) != Some(kind)
-            || uid.and_then(|v| v.get("id")).and_then(Value::as_str) != Some(id)
+        entity
+            .get("uid")
+            .and_then(|uid| EntityUid::from_json(uid.clone()).ok())
+            .is_none_or(|uid| uid != *target)
     });
     entities.push(json!({ "uid": { "type": kind, "id": id }, "attrs": attrs, "parents": [] }));
 }
@@ -521,6 +543,10 @@ fn replace_entity(entities: &mut Vec<Value>, kind: &str, id: &str, attrs: Value)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        db::{AuthorizationGroup, AuthorizationIdentity},
+        iam,
+    };
 
     #[test]
     fn rejects_cross_tenant_resource_before_cedar() {
@@ -557,7 +583,18 @@ mod tests {
         let result = evaluate(
             &schema,
             &policies,
-            &json!([]),
+            &json!([{
+                "uid": {
+                    "__entity": {
+                        "type": "Document",
+                        "id": "one"
+                    }
+                },
+                "attrs": {
+                    "organization_id": organization_id.to_string()
+                },
+                "parents": []
+            }]),
             &request,
             organization_id,
             None,
@@ -735,5 +772,126 @@ mod tests {
             "source": "permit (principal == ?principal, action, resource);"
         }]);
         assert!(iam_policy_references(&policies).is_err());
+    }
+
+    #[test]
+    fn evaluates_transitive_group_roles_from_the_authoritative_graph() {
+        let organization_id = Uuid::now_v7();
+        let application_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let schema = json!({
+            "": {
+                "entityTypes": {
+                    "User": {
+                        "memberOfTypes": ["Group", "Role"],
+                        "shape": {
+                            "type": "Record",
+                            "attributes": {
+                                "organization_id": { "type": "String", "required": true },
+                                "email": { "type": "String", "required": true },
+                                "role": { "type": "String", "required": true }
+                            }
+                        }
+                    },
+                    "Group": {
+                        "memberOfTypes": ["Role"],
+                        "shape": {
+                            "type": "Record",
+                            "attributes": {
+                                "organization_id": { "type": "String", "required": true },
+                                "kind": { "type": "String", "required": true }
+                            }
+                        }
+                    },
+                    "Role": {
+                        "shape": {
+                            "type": "Record",
+                            "attributes": {
+                                "organization_id": { "type": "String", "required": true },
+                                "application_id": { "type": "String", "required": true }
+                            }
+                        }
+                    },
+                    "Document": {
+                        "shape": {
+                            "type": "Record",
+                            "attributes": {
+                                "organization_id": { "type": "String", "required": true }
+                            }
+                        }
+                    }
+                },
+                "actions": {
+                    "read": {
+                        "appliesTo": {
+                            "principalTypes": ["User"],
+                            "resourceTypes": ["Document"],
+                            "context": { "type": "Record", "attributes": {} }
+                        }
+                    }
+                }
+            }
+        })
+        .to_string();
+        let policies = json!([{
+            "name": "group role",
+            "enabled": true,
+            "source": r#"permit (
+                principal in Role::"editor",
+                action == Action::"read",
+                resource
+            );"#
+        }]);
+        let identity = AuthorizationIdentity {
+            user_id,
+            email: "alice@example.com".into(),
+            organization_role: "member".into(),
+            groups: vec![AuthorizationGroup {
+                key: "research".into(),
+                kind: "virtual".into(),
+                role_keys: vec!["editor".into()],
+            }],
+            direct_role_keys: Vec::new(),
+        };
+        let request = EvaluationRequest::new(
+            authzen_rs::Subject::new("User", user_id.to_string()),
+            authzen_rs::Action::new("read"),
+            authzen_rs::Resource::new("Document", "one"),
+        );
+        let full = iam::project_identity(
+            &identity,
+            organization_id,
+            application_id,
+            &Map::new(),
+            true,
+        );
+        let result = evaluate(
+            &schema,
+            &policies,
+            &json!([]),
+            &request,
+            organization_id,
+            Some(SubjectAuthority::EntityGraph(full.entities)),
+        )
+        .unwrap();
+        assert_eq!(result["decision"], true);
+
+        let legacy = iam::project_identity(
+            &identity,
+            organization_id,
+            application_id,
+            &Map::new(),
+            false,
+        );
+        let result = evaluate(
+            &schema,
+            &policies,
+            &json!([]),
+            &request,
+            organization_id,
+            Some(SubjectAuthority::EntityGraph(legacy.entities)),
+        )
+        .unwrap();
+        assert_eq!(result["decision"], false);
     }
 }

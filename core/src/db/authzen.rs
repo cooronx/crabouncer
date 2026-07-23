@@ -1,4 +1,6 @@
+use serde::Deserialize;
 use serde_json::Value;
+use sqlx::types::Json;
 use uuid::Uuid;
 
 use super::{Database, Result};
@@ -21,6 +23,31 @@ pub(crate) struct SearchSubject {
     pub(crate) id: Uuid,
     pub(crate) email: String,
     pub(crate) role: String,
+}
+
+#[derive(Clone)]
+pub(crate) struct AuthorizationIdentity {
+    pub(crate) user_id: Uuid,
+    pub(crate) email: String,
+    pub(crate) organization_role: String,
+    pub(crate) groups: Vec<AuthorizationGroup>,
+    pub(crate) direct_role_keys: Vec<String>,
+}
+
+#[derive(Clone, Deserialize)]
+pub(crate) struct AuthorizationGroup {
+    pub(crate) key: String,
+    pub(crate) kind: String,
+    pub(crate) role_keys: Vec<String>,
+}
+
+#[derive(sqlx::FromRow)]
+struct AuthorizationIdentityRow {
+    user_id: Uuid,
+    email: String,
+    organization_role: String,
+    groups: Json<Vec<AuthorizationGroup>>,
+    direct_role_keys: Json<Vec<String>>,
 }
 
 #[derive(Clone, sqlx::FromRow)]
@@ -106,6 +133,104 @@ impl Database {
         .bind(limit)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    pub(crate) async fn authorization_identity(
+        &self,
+        application_id: Uuid,
+        organization_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Option<AuthorizationIdentity>> {
+        Ok(self
+            .authorization_identities(application_id, organization_id, &[user_id])
+            .await?
+            .into_iter()
+            .next())
+    }
+
+    pub(crate) async fn authorization_identities(
+        &self,
+        application_id: Uuid,
+        organization_id: Uuid,
+        user_ids: &[Uuid],
+    ) -> Result<Vec<AuthorizationIdentity>> {
+        let rows: Vec<AuthorizationIdentityRow> = sqlx::query_as(
+            "SELECT
+                u.id AS user_id,
+                u.email,
+                u.role::text AS organization_role,
+                COALESCE(
+                    (
+                        SELECT jsonb_agg(
+                            jsonb_build_object(
+                                'key', g.key,
+                                'kind', g.kind::text,
+                                'role_keys', COALESCE(
+                                    (
+                                        SELECT jsonb_agg(r.key ORDER BY r.key)
+                                        FROM application_role_group_assignments a
+                                        JOIN application_roles r
+                                          ON r.id = a.role_id
+                                         AND r.organization_id = a.organization_id
+                                        WHERE a.organization_id = u.organization_id
+                                          AND a.group_id = g.id
+                                          AND r.application_id = $1
+                                          AND r.enabled
+                                    ),
+                                    '[]'::jsonb
+                                )
+                            )
+                            ORDER BY g.kind::text, g.key
+                        )
+                        FROM group_memberships m
+                        JOIN groups g
+                          ON g.id = m.group_id
+                         AND g.organization_id = m.organization_id
+                        WHERE m.organization_id = u.organization_id
+                          AND m.user_id = u.id
+                          AND g.enabled
+                    ),
+                    '[]'::jsonb
+                ) AS groups,
+                COALESCE(
+                    (
+                        SELECT jsonb_agg(r.key ORDER BY r.key)
+                        FROM application_role_user_assignments a
+                        JOIN application_roles r
+                          ON r.id = a.role_id
+                         AND r.organization_id = a.organization_id
+                        WHERE a.organization_id = u.organization_id
+                          AND a.user_id = u.id
+                          AND r.application_id = $1
+                          AND r.enabled
+                    ),
+                    '[]'::jsonb
+                ) AS direct_role_keys
+             FROM users u
+             JOIN applications app
+               ON app.id = $1
+              AND app.organization_id = u.organization_id
+             WHERE u.organization_id = $2
+               AND u.status = 'active'
+               AND u.id = ANY($3::uuid[])
+             ORDER BY u.id",
+        )
+        .bind(application_id)
+        .bind(organization_id)
+        .bind(user_ids)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| AuthorizationIdentity {
+                user_id: row.user_id,
+                email: row.email,
+                organization_role: row.organization_role,
+                groups: row.groups.0,
+                direct_role_keys: row.direct_role_keys.0,
+            })
+            .collect())
     }
 
     pub(crate) async fn active_policy_release(

@@ -517,7 +517,7 @@ fn is_allowed(
         &release.entities,
         request,
         organization_id,
-        authoritative_subject,
+        authoritative_subject.map(policy::SubjectAuthority::Attributes),
     )?["decision"]
         .as_bool()
         .unwrap_or(false))

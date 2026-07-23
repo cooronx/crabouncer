@@ -19,7 +19,9 @@ pub(crate) use applications::{
     UpdateApplication,
 };
 pub(crate) use audit::{AuditEvent, ServiceAuditEvent};
-pub(crate) use authzen::{AuthzenCaller, DecisionLog, PolicyRelease, SearchLog, SubjectAttributes};
+pub(crate) use authzen::{
+    AuthorizationGroup, AuthorizationIdentity, AuthzenCaller, DecisionLog, PolicyRelease, SearchLog,
+};
 pub(crate) use bootstrap::BootstrapAdmin;
 pub(crate) use groups::{Group, GroupMember, NewGroup, UpdateGroup};
 pub(crate) use oidc::{

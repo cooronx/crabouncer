@@ -17,9 +17,9 @@ use uuid::Uuid;
 
 use crate::{
     AppState,
-    db::{AuthzenCaller, DecisionLog, PolicyRelease, SubjectAttributes},
+    db::{AuthzenCaller, DecisionLog, PolicyRelease},
     error::{ApiError, Result},
-    policy,
+    iam, policy,
 };
 
 #[derive(Clone)]
@@ -116,42 +116,59 @@ async fn run_evaluation(
     let request_subject = request
         .subject()
         .ok_or_else(|| ApiError::bad_request("subject is required"))?;
+    let resource_type = request
+        .resource()
+        .and_then(authzen_rs::Resource::resource_type)
+        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
+    iam::validate_business_resource_type(resource_type)?;
     let subject = if request_subject.subject_type() == Some("User") {
         request_subject.id().and_then(|id| Uuid::parse_str(id).ok())
     } else {
         None
     };
-    let attributes: Option<SubjectAttributes> = if let Some(user_id) = subject {
+    let identity = if let Some(user_id) = subject {
         state
             .db
-            .active_subject_attributes(user_id, caller.organization_id)
+            .authorization_identity(caller.application_id, caller.organization_id, user_id)
             .await?
     } else {
         None
     };
-    let authoritative =
-        attributes.map(|subject| json!({ "email": subject.email, "role": subject.role }));
-    let evaluation = if authoritative.is_none() {
-        json!({ "decision": false, "reason": "subject_not_found", "policies": [], "errors": [] })
-    } else {
+    let mut iam_snapshot = iam::IamSnapshot::default();
+    let mut evaluation = if let Some(identity) = identity {
         let release: Option<PolicyRelease> = state
             .db
             .active_policy_release(caller.application_id)
             .await?;
         match release {
-            Some(release) => policy::evaluate(
-                &release.schema_source,
-                &release.policies,
-                &release.entities,
-                &request,
-                caller.organization_id,
-                authoritative,
-            )?,
+            Some(release) => {
+                let projection = iam::project_identity(
+                    &identity,
+                    caller.organization_id,
+                    caller.application_id,
+                    request_subject.properties(),
+                    iam::schema_is_iam_ready(&release.schema_source),
+                );
+                iam_snapshot = projection.snapshot;
+                policy::evaluate(
+                    &release.schema_source,
+                    &release.policies,
+                    &release.entities,
+                    &request,
+                    caller.organization_id,
+                    Some(policy::SubjectAuthority::EntityGraph(projection.entities)),
+                )?
+            }
             None => {
                 json!({ "decision": false, "reason": "no_active_release", "policies": [], "errors": [] })
             }
         }
+    } else {
+        json!({ "decision": false, "reason": "subject_not_found", "policies": [], "errors": [] })
     };
+    if let Some(diagnostics) = evaluation.as_object_mut() {
+        diagnostics.insert("iam".into(), json!(iam_snapshot));
+    }
     let allowed = evaluation["decision"].as_bool().unwrap_or(false);
     let reason = evaluation["reason"]
         .as_str()

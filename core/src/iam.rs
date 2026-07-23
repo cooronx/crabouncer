@@ -1,11 +1,127 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, str::FromStr};
 
-use cedar_policy::{Entities, EntityUid, Schema};
-use serde_json::{Value, json};
+use cedar_policy::{Entities, EntityTypeName, EntityUid, Schema};
+use serde::Serialize;
+use serde_json::{Map, Value, json};
 
-use crate::error::{ApiError, Result};
+use crate::{
+    db::{AuthorizationGroup, AuthorizationIdentity},
+    error::{ApiError, Result},
+};
 
 const RESERVED_TYPES: [&str; 3] = ["User", "Group", "Role"];
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub(crate) struct IamSnapshot {
+    pub(crate) groups: Vec<IamGroupSnapshot>,
+    pub(crate) roles: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub(crate) struct IamGroupSnapshot {
+    pub(crate) key: String,
+    pub(crate) kind: String,
+}
+
+pub(crate) struct IamProjection {
+    pub(crate) entities: Vec<Value>,
+    pub(crate) snapshot: IamSnapshot,
+}
+
+pub(crate) fn schema_is_iam_ready(schema_source: &str) -> bool {
+    validate_schema_contract(schema_source).is_ok()
+}
+
+pub(crate) fn project_identity(
+    identity: &AuthorizationIdentity,
+    organization_id: uuid::Uuid,
+    application_id: uuid::Uuid,
+    request_attributes: &Map<String, Value>,
+    include_graph: bool,
+) -> IamProjection {
+    let organization_id = organization_id.to_string();
+    let application_id = application_id.to_string();
+    let mut user_attributes = request_attributes.clone();
+    user_attributes.insert(
+        "organization_id".into(),
+        Value::String(organization_id.clone()),
+    );
+    user_attributes.insert("email".into(), Value::String(identity.email.clone()));
+    user_attributes.insert(
+        "role".into(),
+        Value::String(identity.organization_role.clone()),
+    );
+
+    let mut groups: Vec<AuthorizationGroup> = identity.groups.clone();
+    groups.sort_by(|left, right| (&left.kind, &left.key).cmp(&(&right.kind, &right.key)));
+    let mut direct_roles = identity.direct_role_keys.clone();
+    direct_roles.sort();
+    direct_roles.dedup();
+
+    let mut user_parents = Vec::new();
+    let mut group_entities = Vec::new();
+    let mut effective_roles = BTreeSet::new();
+    let mut snapshot = IamSnapshot::default();
+    if include_graph {
+        for group in groups {
+            let mut group_roles = group.role_keys;
+            group_roles.sort();
+            group_roles.dedup();
+            effective_roles.extend(group_roles.iter().cloned());
+            user_parents.push(entity_uid("Group", &group.key));
+            group_entities.push(json!({
+                "uid": entity_uid("Group", &group.key),
+                "attrs": {
+                    "organization_id": organization_id,
+                    "kind": group.kind,
+                },
+                "parents": group_roles
+                    .iter()
+                    .map(|key| entity_uid("Role", key))
+                    .collect::<Vec<_>>(),
+            }));
+            snapshot.groups.push(IamGroupSnapshot {
+                key: group.key,
+                kind: group.kind,
+            });
+        }
+        for role in direct_roles {
+            effective_roles.insert(role.clone());
+            user_parents.push(entity_uid("Role", &role));
+        }
+        snapshot.roles = effective_roles.iter().cloned().collect();
+    }
+
+    let mut entities = vec![json!({
+        "uid": entity_uid("User", &identity.user_id.to_string()),
+        "attrs": user_attributes,
+        "parents": user_parents,
+    })];
+    entities.extend(group_entities);
+    entities.extend(effective_roles.into_iter().map(|key| {
+        json!({
+            "uid": entity_uid("Role", &key),
+            "attrs": {
+                "organization_id": organization_id,
+                "application_id": application_id,
+            },
+            "parents": [],
+        })
+    }));
+    IamProjection { entities, snapshot }
+}
+
+pub(crate) fn validate_business_resource_type(resource_type: &str) -> Result<()> {
+    let entity_type = EntityTypeName::from_str(resource_type)
+        .map_err(|_| ApiError::bad_request("Cedar entity type is invalid"))?;
+    if reserved_root_type_name(&entity_type).is_some() {
+        Err(ApiError::bad_request(
+            "User, Group, and Role are managed identity types and cannot be business resources",
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 pub(crate) fn reject_reserved_entities(entities: &Value) -> Result<()> {
     let entities = entities
@@ -113,7 +229,10 @@ fn parse_entity_uid(entity: &Value, index: usize) -> Result<EntityUid> {
 }
 
 pub(crate) fn reserved_root_type(uid: &EntityUid) -> Option<&'static str> {
-    let entity_type = uid.type_name();
+    reserved_root_type_name(uid.type_name())
+}
+
+fn reserved_root_type_name(entity_type: &EntityTypeName) -> Option<&'static str> {
     if entity_type.namespace_components().next().is_some() {
         return None;
     }
@@ -121,6 +240,10 @@ pub(crate) fn reserved_root_type(uid: &EntityUid) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|reserved| entity_type.basename() == *reserved)
+}
+
+fn entity_uid(entity_type: &str, id: &str) -> Value {
+    json!({ "type": entity_type, "id": id })
 }
 
 fn require_membership(
@@ -190,6 +313,7 @@ fn iam_schema_error(message: impl Into<String>) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::AuthorizationGroup;
 
     fn schema() -> String {
         json!({
@@ -281,6 +405,9 @@ mod tests {
             filter_reserved_entities(&entities).unwrap(),
             entities.as_array().unwrap().to_owned()
         );
+        assert!(validate_business_resource_type("Application::Role").is_ok());
+        assert!(validate_business_resource_type("Document").is_ok());
+        assert!(validate_business_resource_type("Role").is_err());
     }
 
     #[test]
@@ -306,5 +433,94 @@ mod tests {
             filter_reserved_entities(&json!([{ "uid": { "type": "bad type", "id": "one" } }]))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn projects_authoritative_groups_and_roles_with_stable_snapshots() {
+        let user_id = uuid::Uuid::now_v7();
+        let organization_id = uuid::Uuid::now_v7();
+        let application_id = uuid::Uuid::now_v7();
+        let identity = AuthorizationIdentity {
+            user_id,
+            email: "alice@example.com".into(),
+            organization_role: "member".into(),
+            groups: vec![
+                AuthorizationGroup {
+                    key: "research".into(),
+                    kind: "virtual".into(),
+                    role_keys: vec!["reader".into(), "editor".into()],
+                },
+                AuthorizationGroup {
+                    key: "engineering".into(),
+                    kind: "physical".into(),
+                    role_keys: vec!["reader".into()],
+                },
+            ],
+            direct_role_keys: vec!["writer".into(), "reader".into(), "writer".into()],
+        };
+        let request_attributes = Map::from_iter([
+            ("department".into(), json!("Research")),
+            ("email".into(), json!("spoofed@example.com")),
+        ]);
+        let projection = project_identity(
+            &identity,
+            organization_id,
+            application_id,
+            &request_attributes,
+            true,
+        );
+
+        assert_eq!(
+            projection.snapshot.groups,
+            vec![
+                IamGroupSnapshot {
+                    key: "engineering".into(),
+                    kind: "physical".into(),
+                },
+                IamGroupSnapshot {
+                    key: "research".into(),
+                    kind: "virtual".into(),
+                },
+            ]
+        );
+        assert_eq!(
+            projection.snapshot.roles,
+            vec!["editor", "reader", "writer"]
+        );
+        assert_eq!(projection.entities.len(), 6);
+        assert_eq!(
+            projection.entities[0]["attrs"]["email"],
+            "alice@example.com"
+        );
+        assert_eq!(projection.entities[0]["attrs"]["department"], "Research");
+        assert_eq!(
+            projection.entities[0]["parents"].as_array().unwrap().len(),
+            4
+        );
+    }
+
+    #[test]
+    fn legacy_projection_contains_only_the_authoritative_user() {
+        let identity = AuthorizationIdentity {
+            user_id: uuid::Uuid::now_v7(),
+            email: "alice@example.com".into(),
+            organization_role: "member".into(),
+            groups: vec![AuthorizationGroup {
+                key: "engineering".into(),
+                kind: "physical".into(),
+                role_keys: vec!["reader".into()],
+            }],
+            direct_role_keys: vec!["reader".into()],
+        };
+        let projection = project_identity(
+            &identity,
+            uuid::Uuid::now_v7(),
+            uuid::Uuid::now_v7(),
+            &Map::new(),
+            false,
+        );
+        assert_eq!(projection.entities.len(), 1);
+        assert_eq!(projection.entities[0]["parents"], json!([]));
+        assert_eq!(projection.snapshot, IamSnapshot::default());
     }
 }
