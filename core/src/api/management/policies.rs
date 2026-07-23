@@ -20,7 +20,7 @@ use crate::{
 };
 
 use super::{
-    access::audit_event,
+    access::{audit_event, can_manage},
     applications::{manage_application, view_application},
 };
 
@@ -103,14 +103,53 @@ pub(super) async fn simulate_workspace(
     Json(request): Json<authzen_rs::EvaluationRequest>,
 ) -> Result<Json<Value>> {
     let application = view_application(&state, &current, id).await?;
+    request
+        .validate()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let subject = request
+        .subject()
+        .ok_or_else(|| ApiError::bad_request("subject is required"))?;
+    if subject.subject_type() != Some("User") {
+        return Err(ApiError::bad_request(
+            "Policy simulation requires a User subject",
+        ));
+    }
+    let user_id = subject
+        .id()
+        .and_then(|id| Uuid::parse_str(id).ok())
+        .ok_or_else(|| ApiError::bad_request("subject.id must be a User UUID"))?;
+    if current.id != user_id {
+        can_manage(&current, application.organization_id)?;
+    }
+    let resource_type = request
+        .resource()
+        .and_then(authzen_rs::Resource::resource_type)
+        .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
+    iam::validate_business_resource_type(resource_type)?;
     let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
+    let Some(identity) = state
+        .db
+        .authorization_identity(id, application.organization_id, user_id)
+        .await?
+    else {
+        return Ok(Json(
+            json!({ "decision": false, "reason": "subject_not_found", "policies": [], "errors": [] }),
+        ));
+    };
+    let projection = iam::project_identity(
+        &identity,
+        application.organization_id,
+        id,
+        subject.properties(),
+        iam::schema_is_iam_ready(&snapshot.schema_source),
+    );
     Ok(Json(policy::evaluate(
         &snapshot.schema_source,
         &snapshot.policies,
         &snapshot.entities,
         &request,
         application.organization_id,
-        None,
+        Some(projection.entities),
     )?))
 }
 
