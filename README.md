@@ -12,6 +12,8 @@ administration web app and interoperates with the `authzen-rs` async Rust SDK.
   secrets.
 - AuthZEN single and batch evaluations, including default inheritance and all
   three batch execution semantics.
+- AuthZEN subject, resource, and action search with signed keyset pagination.
+- Schema-validated synchronization of business resources for resource search.
 - Application-scoped Cedar workspaces, validation, simulation, immutable
   releases, atomic publication, and rollback.
 - Hard organization boundaries before Cedar evaluation. Every user belongs to
@@ -76,17 +78,19 @@ hostname, as demonstrated by `compose.yaml` and `web/nginx.conf`.
 5. Validate and publish the workspace. Publication atomically activates an
    immutable release.
 6. Use Authorization Code + PKCE for users and Client Credentials for the PEP.
-   The service token audience is `authzen` and requires `authzen:evaluate`.
+   The service token audience is `authzen`; grant `authzen:evaluate` for
+   AuthZEN calls and `resources:sync` for resource synchronization.
 7. Call `POST /access/v1/evaluation` or `/access/v1/evaluations` and enforce the
    returned `decision`.
 
 AuthZEN metadata is published at `/.well-known/authzen-configuration`. OIDC
 metadata is published at `/.well-known/openid-configuration`.
 
-## Rust SDK
+## Rust clients
 
-Crabouncer uses the published [`authzen-rs`](https://crates.io/crates/authzen-rs)
-crate instead of maintaining a project-specific AuthZEN protocol or SDK:
+Use the published [`authzen-rs`](https://crates.io/crates/authzen-rs) crate for
+the standard AuthZEN Evaluation and Search APIs. Crabouncer does not wrap or
+duplicate its request and response types:
 
 ```toml
 [dependencies]
@@ -107,7 +111,6 @@ let decision = authzen
         Subject::new("User", user_id),
         Action::new("factor.delete"),
         Resource::new("Factor", factor_id)
-            .with_property("organization_id", organization_id.to_string())
             .with_property("owner_id", user_id.to_string()),
     ))
     .await?;
@@ -120,6 +123,60 @@ if !decision.allowed() {
 Obtain `service_access_token` from `/oauth2/token` with the Client Credentials
 grant and the `authzen:evaluate` scope. `authzen-rs` accepts the resulting
 Bearer Token; the calling service is responsible for token caching and refresh.
+
+The workspace also contains `crabouncer-sdk`, a deliberately small client for
+Crabouncer's resource synchronization extension:
+
+```toml
+[dependencies]
+crabouncer-sdk = { path = "sdk" }
+```
+
+```rust
+use crabouncer_sdk::{Crabouncer, SyncOperation, SyncedResource};
+
+let crabouncer = Crabouncer::new(
+    "https://iam.example.com",
+    service_client_id,
+    service_client_secret,
+)?;
+
+let report = crabouncer
+    .sync_resources([
+        SyncOperation::upsert(
+            SyncedResource::new("Document", document_id)
+                .property("title", "Roadmap")
+                .entity_property("owner", "User", owner_id),
+        ),
+        SyncOperation::delete("Document", deleted_document_id),
+    ])
+    .await?;
+
+for failure in report.failures() {
+    eprintln!("resource sync failed at {}: {:?}", failure.index, failure.message);
+}
+```
+
+Call synchronization after the business transaction commits. Upserts and
+deletes are idempotent, batches return one result per operation, and the last
+request received wins when multiple processes update the same resource. The
+client obtains and caches a `resources:sync` service token. It does not include
+an ORM integration, worker, or Outbox; applications that need guaranteed
+delivery can place the same operations in their own transactional Outbox.
+
+`organization_id` is reserved. Crabouncer derives it from the service token and
+injects it before validating a synchronized resource against the active Cedar
+schema. The same tenant attribute is injected when an Evaluation request omits
+it; a conflicting caller-supplied value is denied.
+
+The synchronization endpoint is `POST /resource-sync/v1/resources`. Search
+endpoints are advertised through AuthZEN metadata and are available at:
+
+```text
+POST /access/v1/search/subject
+POST /access/v1/search/resource
+POST /access/v1/search/action
+```
 
 ## Checks
 
