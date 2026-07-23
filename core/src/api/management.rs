@@ -4,6 +4,7 @@ mod groups;
 mod logs;
 mod organizations;
 mod policies;
+mod roles;
 mod sessions;
 mod validation;
 
@@ -59,6 +60,30 @@ pub(super) fn routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route(
             "/api/v1/applications/{id}",
             get(applications::get_application).patch(applications::update_application),
+        )
+        .route(
+            "/api/v1/applications/{id}/roles",
+            get(roles::list_roles).post(roles::create_role),
+        )
+        .route(
+            "/api/v1/application-roles/{id}",
+            get(roles::get_role).patch(roles::update_role),
+        )
+        .route(
+            "/api/v1/application-roles/{id}/assignments",
+            get(roles::list_assignments),
+        )
+        .route(
+            "/api/v1/application-roles/{id}/users/{user_id}",
+            put(roles::assign_user).delete(roles::unassign_user),
+        )
+        .route(
+            "/api/v1/application-roles/{id}/groups/{group_id}",
+            put(roles::assign_group).delete(roles::unassign_group),
+        )
+        .route(
+            "/api/v1/applications/{id}/users/{user_id}/effective-roles",
+            get(roles::effective_roles),
         )
         .route(
             "/api/v1/applications/{id}/service-accounts",

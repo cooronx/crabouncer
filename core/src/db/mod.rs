@@ -6,6 +6,7 @@ mod groups;
 mod oidc;
 mod policies;
 mod resources;
+mod roles;
 mod sessions;
 mod tenants;
 
@@ -29,6 +30,10 @@ pub(crate) use policies::{
     NewPolicyRelease, PolicyReleaseResult, PolicySnapshot, Release, UpdateWorkspace, Workspace,
 };
 pub(crate) use resources::{ResourceWriteStatus, StoredResource};
+pub(crate) use roles::{
+    ApplicationRole, ApplicationRoleAssignment, EffectiveRole, NewApplicationRole,
+    UpdateApplicationRole,
+};
 pub(crate) use sessions::{Actor, LoginUser, NewSession};
 pub(crate) use tenants::{
     ActivationToken, NewOrganization, NewUser, Organization, UpdateOrganization, UpdateUser, User,

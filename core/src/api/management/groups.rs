@@ -19,7 +19,7 @@ use super::{
     validation,
 };
 
-async fn load_group(state: &AppState, id: Uuid) -> Result<Group> {
+pub(super) async fn load_group(state: &AppState, id: Uuid) -> Result<Group> {
     state
         .db
         .group(id)
