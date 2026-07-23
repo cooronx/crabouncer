@@ -130,7 +130,7 @@ pub(super) async fn publish_release(
 ) -> Result<(StatusCode, Json<Value>)> {
     let application = manage_application(&state, &current, id).await?;
     let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
-    validate_policy_candidate(
+    let iam_ready = validate_policy_candidate(
         &state,
         id,
         application.organization_id,
@@ -150,6 +150,7 @@ pub(super) async fn publish_release(
             application_id: id,
             created_by: current.id,
             snapshot,
+            iam_ready,
             audit: AuditEvent {
                 organization_id: Some(application.organization_id),
                 actor_user_id: current.id,
@@ -181,7 +182,7 @@ pub(super) async fn activate_release(
         .policy_release(id, release_id)
         .await?
         .ok_or_else(|| ApiError::not_found("Release"))?;
-    validate_policy_candidate(
+    let iam_ready = validate_policy_candidate(
         &state,
         id,
         application.organization_id,
@@ -200,20 +201,24 @@ pub(super) async fn activate_release(
     }
     if !state
         .db
-        .activate_policy_release(id, release_id, current.id)
+        .activate_policy_release(
+            id,
+            release_id,
+            current.id,
+            iam_ready,
+            AuditEvent {
+                organization_id: Some(application.organization_id),
+                actor_user_id: current.id,
+                action: "policy_release.activate".into(),
+                target_type: "policy_release".into(),
+                target_id: Some(release_id.to_string()),
+                details: json!({}),
+            },
+        )
         .await?
     {
         return Err(ApiError::not_found("Release"));
     }
-    audit_event(
-        &state,
-        &current,
-        Some(application.organization_id),
-        "policy_release.activate",
-        "policy_release",
-        release_id,
-    )
-    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -224,7 +229,7 @@ async fn validate_policy_candidate(
     schema_source: &str,
     policies: &Value,
     entities: &Value,
-) -> Result<()> {
+) -> Result<bool> {
     policy::validate_workspace(schema_source, policies, entities)?;
     let references = policy::iam_policy_references(policies)?;
     let missing_groups = state
@@ -244,13 +249,15 @@ async fn validate_policy_candidate(
             }),
         ));
     }
+    let contract = iam::validate_schema_contract(schema_source);
+    let iam_ready = contract.is_ok();
     if !references.is_empty()
         || state
             .db
             .application_has_role_assignments(application_id)
             .await?
     {
-        iam::validate_schema_contract(schema_source)?;
+        contract?;
     }
-    Ok(())
+    Ok(iam_ready)
 }

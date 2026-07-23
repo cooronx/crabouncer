@@ -43,6 +43,7 @@ pub(crate) struct NewPolicyRelease {
     pub(crate) application_id: Uuid,
     pub(crate) created_by: Uuid,
     pub(crate) snapshot: PolicySnapshot,
+    pub(crate) iam_ready: bool,
     pub(crate) audit: AuditEvent,
 }
 
@@ -89,10 +90,8 @@ impl Database {
         release: NewPolicyRelease,
     ) -> Result<PolicyReleaseResult> {
         let mut tx = self.pool.begin().await?;
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
-            .bind(release.application_id)
-            .execute(&mut *tx)
-            .await?;
+        lock_application(&mut tx, release.application_id).await?;
+        ensure_assignment_compatibility(&mut tx, release.application_id, release.iam_ready).await?;
         let version: i64 = sqlx::query_scalar(
             "SELECT COALESCE(max(version), 0) + 1 FROM policy_releases WHERE application_id = $1",
         )
@@ -131,24 +130,80 @@ impl Database {
         application_id: Uuid,
         release_id: Uuid,
         actor_id: Uuid,
+        iam_ready: bool,
+        audit_event: AuditEvent,
     ) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        lock_application(&mut tx, application_id).await?;
         let exists: bool = sqlx::query_scalar(
             "SELECT EXISTS(SELECT 1 FROM policy_releases WHERE id = $1 AND application_id = $2)",
         )
         .bind(release_id)
         .bind(application_id)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
         if !exists {
+            tx.commit().await?;
             return Ok(false);
         }
+        ensure_assignment_compatibility(&mut tx, application_id, iam_ready).await?;
         sqlx::query("INSERT INTO active_policy_releases (application_id, release_id, activated_by) VALUES ($1, $2, $3) ON CONFLICT (application_id) DO UPDATE SET release_id = EXCLUDED.release_id, activated_by = EXCLUDED.activated_by, activated_at = now()")
             .bind(application_id)
             .bind(release_id)
             .bind(actor_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        audit::insert(&mut tx, audit_event).await?;
+        tx.commit().await?;
         Ok(true)
+    }
+}
+
+pub(super) async fn lock_application(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    application_id: Uuid,
+) -> Result<()> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))")
+        .bind(application_id)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn ensure_assignment_compatibility(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    application_id: Uuid,
+    iam_ready: bool,
+) -> Result<()> {
+    if iam_ready {
+        return Ok(());
+    }
+    let has_assignments: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+            SELECT 1
+            FROM application_roles role
+            WHERE role.application_id = $1
+              AND (
+                EXISTS (
+                    SELECT 1
+                    FROM application_role_user_assignments assignment
+                    WHERE assignment.role_id = role.id
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM application_role_group_assignments assignment
+                    WHERE assignment.role_id = role.id
+                )
+              )
+        )",
+    )
+    .bind(application_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if has_assignments {
+        Err(super::Error::SchemaNotRoleReady)
+    } else {
+        Ok(())
     }
 }
 

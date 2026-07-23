@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use super::{AuditEvent, Database, Group, Result, audit};
+use super::{AuditEvent, Database, Error, Group, Result, audit, policies::lock_application};
 
 #[derive(Clone, Serialize, sqlx::FromRow)]
 pub(crate) struct ApplicationRole {
@@ -281,8 +281,11 @@ impl Database {
         role: &ApplicationRole,
         user_id: Uuid,
         actor_user_id: Uuid,
+        expected_release_id: Uuid,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        lock_application(&mut tx, role.application_id).await?;
+        ensure_active_release(&mut tx, role.application_id, expected_release_id).await?;
         let result = sqlx::query(
             "INSERT INTO application_role_user_assignments (role_id, user_id, organization_id)
              SELECT $1, u.id, $2 FROM users u
@@ -339,8 +342,11 @@ impl Database {
         role: &ApplicationRole,
         group: &Group,
         actor_user_id: Uuid,
+        expected_release_id: Uuid,
     ) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        lock_application(&mut tx, role.application_id).await?;
+        ensure_active_release(&mut tx, role.application_id, expected_release_id).await?;
         let result = sqlx::query(
             "INSERT INTO application_role_group_assignments (role_id, group_id, organization_id)
              VALUES ($1, $2, $3)
@@ -448,6 +454,24 @@ impl Database {
         }
         tx.commit().await?;
         Ok(changed)
+    }
+}
+
+async fn ensure_active_release(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    application_id: Uuid,
+    expected_release_id: Uuid,
+) -> Result<()> {
+    let current_release_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT release_id FROM active_policy_releases WHERE application_id = $1",
+    )
+    .bind(application_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    if current_release_id == Some(expected_release_id) {
+        Ok(())
+    } else {
+        Err(Error::PolicyStateChanged)
     }
 }
 

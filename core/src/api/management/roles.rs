@@ -134,12 +134,12 @@ pub(super) async fn assign_user(
 ) -> Result<StatusCode> {
     let role = load_role(&state, role_id).await?;
     can_manage(&current, role.organization_id)?;
-    ensure_schema_ready(&state, role.application_id).await?;
+    let release_id = ensure_schema_ready(&state, role.application_id).await?;
     let user = load_user_access(&state, user_id).await?;
     ensure_same_organization(user.organization_id, role.organization_id, "User and role")?;
     state
         .db
-        .assign_role_to_user(&role, user_id, current.id)
+        .assign_role_to_user(&role, user_id, current.id, release_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -167,7 +167,7 @@ pub(super) async fn assign_group(
 ) -> Result<StatusCode> {
     let role = load_role(&state, role_id).await?;
     can_manage(&current, role.organization_id)?;
-    ensure_schema_ready(&state, role.application_id).await?;
+    let release_id = ensure_schema_ready(&state, role.application_id).await?;
     let group = load_group(&state, group_id).await?;
     ensure_same_organization(
         group.organization_id,
@@ -176,7 +176,7 @@ pub(super) async fn assign_group(
     )?;
     state
         .db
-        .assign_role_to_group(&role, &group, current.id)
+        .assign_role_to_group(&role, &group, current.id, release_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -229,13 +229,14 @@ async fn load_user_access(state: &AppState, user_id: Uuid) -> Result<UserAccess>
         .ok_or_else(|| ApiError::not_found("User"))
 }
 
-async fn ensure_schema_ready(state: &AppState, application_id: Uuid) -> Result<()> {
+async fn ensure_schema_ready(state: &AppState, application_id: Uuid) -> Result<Uuid> {
     let release = state
         .db
         .active_policy_release(application_id)
         .await?
         .ok_or_else(schema_not_role_ready)?;
-    iam::validate_schema_contract(&release.schema_source).map_err(|_| schema_not_role_ready())
+    iam::validate_schema_contract(&release.schema_source).map_err(|_| schema_not_role_ready())?;
+    Ok(release.id)
 }
 
 fn ensure_same_organization(actual: Uuid, expected: Uuid, subject: &'static str) -> Result<()> {

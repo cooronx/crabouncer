@@ -82,6 +82,14 @@ impl From<db::Error> for ApiError {
                 "already_exists",
                 "A resource with the same unique value already exists",
             ),
+            db::Error::PolicyStateChanged => Self::conflict(
+                "policy_state_changed",
+                "The active policy release changed; retry the request",
+            ),
+            db::Error::SchemaNotRoleReady => Self::conflict(
+                "schema_not_role_ready",
+                "The active policy release does not satisfy the User, Group, and Role schema contract",
+            ),
             db::Error::Internal(error) => {
                 tracing::error!(%error, "database error");
                 Self::new(

@@ -63,6 +63,8 @@ impl Database {
 #[derive(Debug)]
 pub(crate) enum Error {
     Conflict,
+    PolicyStateChanged,
+    SchemaNotRoleReady,
     Internal(sqlx::Error),
     Migration(sqlx::migrate::MigrateError),
 }
@@ -71,6 +73,10 @@ impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Conflict => formatter.write_str("database conflict"),
+            Self::PolicyStateChanged => formatter.write_str("active policy release changed"),
+            Self::SchemaNotRoleReady => {
+                formatter.write_str("policy schema is not ready for application roles")
+            }
             Self::Internal(_) => formatter.write_str("database operation failed"),
             Self::Migration(_) => formatter.write_str("database migration failed"),
         }
@@ -80,7 +86,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Conflict => None,
+            Self::Conflict | Self::PolicyStateChanged | Self::SchemaNotRoleReady => None,
             Self::Internal(error) => Some(error),
             Self::Migration(error) => Some(error),
         }
