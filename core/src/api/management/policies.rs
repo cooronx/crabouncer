@@ -127,6 +127,7 @@ pub(super) async fn simulate_workspace(
         .ok_or_else(|| ApiError::bad_request("resource.type is required"))?;
     iam::validate_business_resource_type(resource_type)?;
     let snapshot: PolicySnapshot = state.db.policy_snapshot(id).await?;
+    policy::iam_policy_references(&snapshot.policies)?;
     let Some(identity) = state
         .db
         .authorization_identity(id, application.organization_id, user_id)
